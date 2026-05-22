@@ -1,0 +1,53 @@
+# Qwen3-30B-A3B smoke test config — reduced data for fast iteration
+# Usage: python main.py --config configs/local/qwen3_30b_a3b_smoke.yaml --max-layers 1
+
+model:
+  name: "/data1/models/Qwen3-30B-A3B-Instruct-2507"
+  device: "cuda"
+  dtype: "bfloat16"
+
+data:
+  dataset_name: "open_thoughts"
+  batch_size: 16        # 64 → 16
+  num_samples: 256      # 4096 → 256
+  max_length: 2048      # 4096 → 2048
+  num_workers: 4        # 8 → 4
+  val_samples: 32       # 128 → 32
+
+quantization:
+  gsq_bits: 2
+  init_method: "gptq"
+  gsq_enabled: true
+  start_layer: 0
+  self_attn: false
+  std: 0.01
+  temperature: [2, 0.05]
+  scale: [100, 500]
+  groupsize: 128
+  strength: 6
+  logits_dtype: "bfloat16"
+
+training:
+  num_epochs: 2         # 10 → 2
+  device_microbatch_size: 4
+  lr1: 0.0002
+  lr2: 0.0001
+  weight_decay: 1.0
+  checkpoint_dir: "checkpoints/qwen3-30b-smoke"
+  log_dir: "logs/qwen3-30b-smoke"
+  act_cache_dir: "cache/act_cache"
+  eval_baseline: true
+
+gptq:
+  nsamples: 128         # 512 → 128
+  wbits: 2
+  sym: true
+  trits: false
+  percdamp: 0.1
+  blocksize: 128
+  groupsize: 128
+  static_groups: false
+  prunen: 0
+  prunem: 0
+
+wandb: false
