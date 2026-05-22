@@ -152,7 +152,7 @@ class KimiK25Wrapper(BaseModelWrapper):
     
     @torch.no_grad()
     def ppl_evaluation(self, read_from_disk=-1):
-        dataset = get_dataset("wikitext2")
+        dataset = get_dataset("wikitext2", self.tokenizer)
         testloader = prepare_test_dataloader(
                 dataset=dataset["test"], 
                 tokenizer=self.tokenizer, 
