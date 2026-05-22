@@ -100,7 +100,7 @@ def get_dataset(name: str, tokenizer, ppl_seed=1234, ppl_max_samples=1000, test_
         return open_thoughts_test_dataset(tokenizer, ppl_seed=ppl_seed, ppl_max_samples=ppl_max_samples)
 
     ds_properties = {
-        "wikitext2": {"path": "wikitext", "config_name": "wikitext-2-raw-v1"},
+        "wikitext2": {"path": "Salesforce/wikitext", "config_name": "wikitext-2-raw-v1"},
         "ptb": {"path": "ptb_text_only", "config_name": "penn_treebank"},
         "c4": {
             "path": "allenai/c4",
