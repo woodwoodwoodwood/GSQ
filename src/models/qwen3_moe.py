@@ -107,11 +107,21 @@ class Qwen3MoeWrapper(BaseModelWrapper):
 
             if quantized_weights is not None:
                 key = f"{layer_key}.mlp.experts.{eid_val}"
-                qw = quantized_weights[key]
-                gate_out = F.linear(inp_e, qw["gate_proj"][0] if isinstance(qw["gate_proj"], tuple) else qw["gate_proj"])
-                up_out = F.linear(inp_e, qw["up_proj"][0] if isinstance(qw["up_proj"], tuple) else qw["up_proj"])
+                if key in quantized_weights:
+                    # Nested dict format (distributed mode)
+                    qw = quantized_weights[key]
+                    gate_w_q = qw["gate_proj"]
+                    up_w_q = qw["up_proj"]
+                    down_w_q = qw["down_proj"]
+                else:
+                    # Flat format (local mode)
+                    gate_w_q = quantized_weights[f"{key}.gate_proj"]
+                    up_w_q = quantized_weights[f"{key}.up_proj"]
+                    down_w_q = quantized_weights[f"{key}.down_proj"]
+                gate_out = F.linear(inp_e, gate_w_q[0] if isinstance(gate_w_q, tuple) else gate_w_q)
+                up_out = F.linear(inp_e, up_w_q[0] if isinstance(up_w_q, tuple) else up_w_q)
                 hidden_act = experts.act_fn(gate_out) * up_out
-                out_e = F.linear(hidden_act, qw["down_proj"][0] if isinstance(qw["down_proj"], tuple) else qw["down_proj"])
+                out_e = F.linear(hidden_act, down_w_q[0] if isinstance(down_w_q, tuple) else down_w_q)
 
             if gpts_calib is not None:
                 lk = f"{layer_key}.mlp.experts.{eid_val}"
