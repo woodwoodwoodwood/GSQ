@@ -6,7 +6,7 @@ import math
 import gc
 from .base import BaseModelWrapper
 from src.evaluation.wiki_eval import *
-from src.utils.progress_reporter import report_gptq_calib, report_gptq_linear
+from src.utils.progress_reporter import report_gptq_calib, report_gptq_linear, report_ppl_layer
 from src.prior.gptq import GPTQ, rtn_quantize
 from src.prior.quant import Quantizer
 
