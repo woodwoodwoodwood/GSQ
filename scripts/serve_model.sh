@@ -193,6 +193,9 @@ PY
 
 cd "${REPO_ROOT}"
 
+# Bypass flashinfer version mismatch check (flashinfer 0.6.3 vs flashinfer-jit-cache 0.6.8)
+export FLASHINFER_DISABLE_VERSION_CHECK=1
+
 # Sensible local cache locations to keep Triton/Inductor off the home filesystem.
 export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-${GSQ_RUNTIME}/.triton_cache}"
 export TRITON_HOME="${TRITON_HOME:-${GSQ_RUNTIME}/.triton}"
