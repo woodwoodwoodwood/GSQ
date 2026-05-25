@@ -13,9 +13,9 @@ set -euo pipefail
 # shellcheck disable=SC1091
 source "$(dirname "$0")/_common.sh"
 
-CONFIG_FILE="${CONFIG_FILE:-configs/local/config.yaml}"
-RUN_ID="${RUN_ID:-}"
-OUT_DIR="${OUT_DIR:-}"
+CONFIG_FILE="configs/local/qwen3_30b_a3b_local.yaml"
+RUN_ID=""
+OUT_DIR="/usr/local/app/models/Qwen3-30B-A3B-Instruct-2507-gsq-2bit"
 
 [[ "${CONFIG_FILE}" != /* ]] && CONFIG_FILE="${REPO_ROOT}/${CONFIG_FILE}"
 
