@@ -177,7 +177,6 @@ for MODEL_NAME in ${MODELS}; do
         --concurrency ${CONCURRENCY_LEVELS} \
         --num-prompts "${NUM_PROMPTS}" \
         --warmup "${WARMUP}" \
-        --gpu-id 0 \
         --output-json "${JSON_OUT}" \
         || echo "  WARNING: benchmark had errors"
 
@@ -219,9 +218,9 @@ input_lens = sorted(set(r["input_len"] for results in all_data.values() for r in
 
 for il in input_lens:
     print(f"\n--- Input Length: {il} tokens ---")
-    print(f"{'Model':<8} | {'Conc':>4} | {'Throughput':>10} | {'TTFT':>8} | {'TPOT':>8} | {'Latency':>8} | {'PeakMem':>8} | {'ΔMem':>7}")
-    print(f"{'':8} | {'':4} | {'tok/s':>10} | {'s':>8} | {'ms':>8} | {'s':>8} | {'MiB':>8} | {'GiB':>7}")
-    print("-" * 85)
+    print(f"{'Model':<8} | {'Conc':>4} | {'Throughput':>10} | {'TTFT':>8} | {'TPOT':>8} | {'Latency':>8} | {'GPUMem':>8}")
+    print(f"{'':8} | {'':4} | {'tok/s':>10} | {'s':>8} | {'ms':>8} | {'s':>8} | {'GiB':>8}")
+    print("-" * 75)
     for m in models:
         if m not in all_data:
             continue
@@ -231,6 +230,7 @@ for il in input_lens:
             ttft = f"{r['ttft_mean_s']:.3f}" if r.get('ttft_mean_s') else "N/A"
             tpot = f"{r['tpot_mean_ms']:.2f}" if r.get('tpot_mean_ms') else "N/A"
             lat = f"{r['latency_mean_s']:.3f}" if r.get('latency_mean_s') else "N/A"
+            gmem = f"{r['gpu_mem_gib']:.2f}" if r.get('gpu_mem_gib') else "N/A"
             print(f"{m:<8} | {r['concurrency']:>4} | {r['throughput_tok_per_s']:>10.2f} | "
-                  f"{ttft:>8} | {tpot:>8} | {lat:>8} | {r['gpu_peak_mib']:>8} | {r['gpu_delta_gib']:>7.2f}")
+                  f"{ttft:>8} | {tpot:>8} | {lat:>8} | {gmem:>8}")
 PY
