@@ -17,8 +17,8 @@
 set -euo pipefail
 
 # Skip .venv activation — use the current conda environment which has lm_eval installed.
-# _common.sh activates VENV_PATH if it exists; point to conda prefix (already active).
-export VENV_PATH="${CONDA_PREFIX:-/nonexistent}"
+# Point VENV_PATH to a non-existent path so _common.sh skips venv activation.
+export VENV_PATH="/nonexistent_venv_skip"
 
 # shellcheck disable=SC1091
 source "$(dirname "$0")/_common.sh"
