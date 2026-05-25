@@ -90,7 +90,7 @@ def main():
     else:
         print(f"Single-node mode (--num-nodes={args.num_nodes}); skipping Ray cluster wait.")
 
-    cmd = ["vllm", "serve"] + vllm_args
+    cmd = ["vllm", "serve", "--port", str(args.port)] + vllm_args
     proc = subprocess.Popen(cmd)
     try:
         if wait_for_health(args.port, timeout_sec=args.health_timeout):
