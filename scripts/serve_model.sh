@@ -18,25 +18,24 @@ set -euo pipefail
 # shellcheck disable=SC1091
 source "$(dirname "$0")/_common.sh"
 
-MODEL_PATH="${MODEL_PATH:-}"
-RUN_ID="${RUN_ID:-}"
-PORT="${PORT:-8000}"
-HOST="${HOST:-0.0.0.0}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
-TP_SIZE="${TP_SIZE:-$(detect_num_gpus)}"
-[[ "${TP_SIZE}" -lt 1 ]] && TP_SIZE=1
+MODEL_PATH="/usr/local/app/models/Qwen3-30B-A3B-Instruct-2507-gsq-2bit"
+RUN_ID=""
+PORT="8000"
+HOST="0.0.0.0"
+MAX_MODEL_LEN="4096"
+TP_SIZE="1"
 
 # --tokenizer-mode hf      : avoids garbled output on long-running serves (vLLM #35718)
 # --mm-encoder-tp-mode data: required for Kimi-K2.5 (ViT dims not divisible by TP)
 EXTRA_VLLM_ARGS="${EXTRA_VLLM_ARGS:---gpu-memory-utilization 0.85 --tokenizer-mode hf --mm-encoder-tp-mode data --max-num-seqs 4}"
 
-EVAL="${EVAL:-0}"
-EVAL_CONFIG_FILE="${EVAL_CONFIG_FILE:-configs/local/config.yaml}"
-EVAL_TASKS="${EVAL_TASKS:-gsm8k,arc_challenge,arc_easy,winogrande,piqa}"
-EVAL_NUM_CONCURRENT="${EVAL_NUM_CONCURRENT:-8}"
-EVAL_LIMIT="${EVAL_LIMIT:-}"
-EVAL_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-}"
-EVAL_WANDB_FLAG="${EVAL_WANDB_FLAG:-}"
+EVAL="1"
+EVAL_CONFIG_FILE="configs/local/qwen3_30b_a3b_local.yaml"
+EVAL_TASKS="gsm8k,arc_challenge,arc_easy,winogrande,piqa"
+EVAL_NUM_CONCURRENT="8"
+EVAL_LIMIT=""
+EVAL_OUTPUT_DIR=""
+EVAL_WANDB_FLAG="--no-wandb"
 
 # Checkpoint roots for RUN_ID lookups: flattened layout plus legacy runtime/gsq/... dirs.
 _GSQ_CKPT_SEARCH_ROOTS=(
