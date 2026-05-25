@@ -32,12 +32,13 @@ TP_SIZE="1"
 
 # --tokenizer-mode hf      : avoids garbled output on long-running serves (vLLM #35718)
 # --mm-encoder-tp-mode data: required for Kimi-K2.5 (ViT dims not divisible by TP)
-EXTRA_VLLM_ARGS="${EXTRA_VLLM_ARGS:---gpu-memory-utilization 0.85 --tokenizer-mode hf --mm-encoder-tp-mode data --max-num-seqs 4}"
+# Short eval sequences -> reduce max-model-len to free KV-cache, increase max-num-seqs for throughput
+EXTRA_VLLM_ARGS="${EXTRA_VLLM_ARGS:---gpu-memory-utilization 0.85 --tokenizer-mode hf --mm-encoder-tp-mode data --max-num-seqs 32}"
 
 EVAL="1"
 EVAL_CONFIG_FILE="configs/local/qwen3_30b_a3b_local.yaml"
 EVAL_TASKS="gsm8k,arc_challenge,arc_easy,winogrande,piqa"
-EVAL_NUM_CONCURRENT="8"
+EVAL_NUM_CONCURRENT="16"
 EVAL_LIMIT=""
 EVAL_OUTPUT_DIR=""
 EVAL_WANDB_FLAG="--no-wandb"
