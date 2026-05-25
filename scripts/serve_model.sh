@@ -23,7 +23,8 @@ export VENV_PATH="/nonexistent_venv_skip"
 # shellcheck disable=SC1091
 source "$(dirname "$0")/_common.sh"
 
-MODEL_PATH="/usr/local/app/models/Qwen3-30B-A3B-Instruct-2507-gsq-2bit"
+# MODEL_PATH="/usr/local/app/models/Qwen3-30B-A3B-Instruct-2507-gsq-2bit"
+MODEL_PATH="/usr/local/app/models/Qwen3-30B-A3B-Instruct-2507"
 RUN_ID=""
 PORT="8900"
 HOST="127.0.0.1"
