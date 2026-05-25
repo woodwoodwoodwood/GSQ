@@ -20,7 +20,7 @@ source "$(dirname "$0")/_common.sh"
 
 MODEL_PATH="/usr/local/app/models/Qwen3-30B-A3B-Instruct-2507-gsq-2bit"
 RUN_ID=""
-PORT="8001"
+PORT="8900"
 HOST="0.0.0.0"
 MAX_MODEL_LEN="4096"
 TP_SIZE="1"
