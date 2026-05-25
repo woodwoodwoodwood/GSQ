@@ -106,17 +106,28 @@ class GPUMemoryMonitor:
 
     Monitors total memory across all GPUs used by the vLLM process.
     If vLLM GPUs cannot be auto-detected, monitors all GPUs.
+
+    Key insight: vLLM pre-allocates memory (model weights + KV cache pool)
+    at startup, so the "baseline" after model load is already high.
+    We report:
+      - idle_mib: GPU memory before vLLM starts (if available)
+      - baseline_mib: GPU memory when monitor starts (post model load)
+      - peak_mib: peak GPU memory during benchmark
+    The meaningful metric is baseline_mib (which includes model + KV pool),
+    not delta, since vLLM's memory pool is pre-allocated and delta is often ~0.
     """
 
-    def __init__(self, gpu_ids=None, interval=0.5):
+    def __init__(self, gpu_ids=None, interval=0.3):
         self.gpu_ids = gpu_ids  # None = all GPUs
         self.interval = interval
         self.peak_mib = 0
         self.baseline_mib = 0
+        self.idle_mib = 0
         self._stop = threading.Event()
         self._thread = None
         self._samples = []
         self._per_gpu_samples = []
+        self._first_sample = True
 
     def _get_memory(self):
         """Get total memory across monitored GPUs."""
@@ -132,6 +143,7 @@ class GPUMemoryMonitor:
     def start(self):
         mem, per_gpu = self._get_memory()
         self.baseline_mib = mem or 0
+        self._first_sample = True
         self._stop.clear()
         self._samples = []
         self._per_gpu_samples = []
@@ -156,10 +168,13 @@ class GPUMemoryMonitor:
     def get_results(self):
         # Per-GPU peak
         per_gpu_peak = {}
-        for sample in self._per_gpu_samples:
+        per_gpu_baseline = {}
+        for i, sample in enumerate(self._per_gpu_samples):
             for gid, mem in sample.items():
                 if gid not in per_gpu_peak or mem > per_gpu_peak[gid]:
                     per_gpu_peak[gid] = mem
+                if i == 0:
+                    per_gpu_baseline[gid] = mem
 
         return {
             "baseline_mib": self.baseline_mib,
@@ -167,8 +182,7 @@ class GPUMemoryMonitor:
             "delta_mib": self.peak_mib - self.baseline_mib,
             "delta_gib": round((self.peak_mib - self.baseline_mib) / 1024, 2),
             "num_samples": len(self._samples),
-            "per_gpu_baseline": {gid: s.get(gid, 0) for gid, s in
-                                 zip([0], [self._per_gpu_samples[0]] if self._per_gpu_samples else [{}])},
+            "per_gpu_baseline": per_gpu_baseline,
             "per_gpu_peak": per_gpu_peak,
             "gpu_ids_monitored": self.gpu_ids,
         }
@@ -249,10 +263,24 @@ def run_benchmark(args, input_len, concurrency, num_prompts):
           f"Prompts: {num_prompts} | Output: {args.output_len} tokens")
     print(f"{'='*70}")
 
-    # Start GPU memory monitor (auto-detect vLLM GPUs)
+    # Record idle GPU memory (before benchmark requests)
     vllm_gpus = find_vllm_gpus()
     if vllm_gpus:
         print(f"  Detected vLLM GPUs: {vllm_gpus}")
+    idle_per_gpu = get_per_gpu_memory_mib()
+    if vllm_gpus and idle_per_gpu:
+        idle_mib = sum(idle_per_gpu.get(gid, 0) for gid in vllm_gpus)
+    elif idle_per_gpu:
+        idle_mib = sum(idle_per_gpu.values())
+    else:
+        idle_mib = 0
+    print(f"  Idle GPU memory (post model-load): {idle_mib} MiB")
+    if vllm_gpus and idle_per_gpu:
+        per_gpu_str = "  Per-GPU idle : " + "  ".join(
+            f"GPU{g}={idle_per_gpu.get(g, 0)}MiB" for g in vllm_gpus)
+        print(per_gpu_str)
+
+    # Start GPU memory monitor (auto-detect vLLM GPUs)
     gpu_mon = GPUMemoryMonitor(gpu_ids=vllm_gpus, interval=0.3)
     gpu_mon.start()
 
@@ -309,11 +337,13 @@ def run_benchmark(args, input_len, concurrency, num_prompts):
         "latency_mean_s": round(statistics.mean(latencies), 4) if latencies else None,
         "latency_median_s": round(statistics.median(latencies), 4) if latencies else None,
         # GPU Memory
+        "gpu_idle_mib": idle_mib,
         "gpu_baseline_mib": gpu_results["baseline_mib"],
         "gpu_peak_mib": gpu_results["peak_mib"],
         "gpu_delta_mib": gpu_results["delta_mib"],
         "gpu_delta_gib": round(gpu_results["delta_gib"], 2),
         "gpu_ids_monitored": gpu_results.get("gpu_ids_monitored"),
+        "per_gpu_idle": {g: idle_per_gpu.get(g, 0) for g in (vllm_gpus or idle_per_gpu.keys())},
         "per_gpu_peak": gpu_results.get("per_gpu_peak", {}),
     }
 
@@ -325,12 +355,21 @@ def run_benchmark(args, input_len, concurrency, num_prompts):
         print(f"  TPOT       : mean={output['tpot_mean_ms']:.2f}ms  median={output['tpot_median_ms']:.2f}ms")
     if latencies:
         print(f"  Latency    : mean={output['latency_mean_s']:.3f}s  median={output['latency_median_s']:.3f}s")
-    print(f"  GPU Memory : baseline={gpu_results['baseline_mib']}MiB  peak={gpu_results['peak_mib']}MiB  "
-          f"delta={gpu_results['delta_mib']}MiB ({gpu_results['delta_gib']:.2f}GiB)")
+    print(f"  GPU Memory : idle={idle_mib}MiB  baseline={gpu_results['baseline_mib']}MiB  "
+          f"peak={gpu_results['peak_mib']}MiB  delta={gpu_results['delta_mib']}MiB")
+    # Per-GPU breakdown (idle → peak, showing the real memory footprint)
     per_gpu_peak = gpu_results.get("per_gpu_peak", {})
+    per_gpu_baseline = gpu_results.get("per_gpu_baseline", {})
     if per_gpu_peak:
-        gpu_str = "  Per-GPU    : " + "  ".join(f"GPU{g}={m}MiB" for g, m in sorted(per_gpu_peak.items()))
+        gpu_ids = sorted(per_gpu_peak.keys())
+        gpu_str = "  Per-GPU    : " + "  ".join(
+            f"GPU{g}={per_gpu_peak.get(g, 0)}MiB" for g in gpu_ids)
         print(gpu_str)
+        # Also show idle per-GPU for reference
+        if idle_per_gpu:
+            idle_str = "  Per-GPU idle: " + "  ".join(
+                f"GPU{g}={idle_per_gpu.get(g, 0)}MiB" for g in gpu_ids)
+            print(idle_str)
 
     return output
 
@@ -387,15 +426,16 @@ def main():
         print(f"\n{'='*100}")
         print(f"SUMMARY")
         print(f"{'='*100}")
-        print(f"{'Input':>7} | {'Conc':>4} | {'Throughput':>10} | {'TTFT':>8} | {'TPOT':>8} | {'Latency':>8} | {'PeakMem':>8} | {'ΔMem':>7}")
-        print(f"{'tokens':>7} | {'':4} | {'tok/s':>10} | {'s':>8} | {'ms':>8} | {'s':>8} | {'MiB':>8} | {'GiB':>7}")
+        print(f"{'Input':>7} | {'Conc':>4} | {'Throughput':>10} | {'TTFT':>8} | {'TPOT':>8} | {'Latency':>8} | {'PeakMem':>8} | {'IdleMem':>8}")
+        print(f"{'tokens':>7} | {'':4} | {'tok/s':>10} | {'s':>8} | {'ms':>8} | {'s':>8} | {'MiB':>8} | {'MiB':>8}")
         print("-" * 100)
         for r in all_results:
             ttft = f"{r['ttft_mean_s']:.3f}" if r.get('ttft_mean_s') else "N/A"
             tpot = f"{r['tpot_mean_ms']:.2f}" if r.get('tpot_mean_ms') else "N/A"
             lat = f"{r['latency_mean_s']:.3f}" if r.get('latency_mean_s') else "N/A"
+            idle = f"{r.get('gpu_idle_mib', 0)}" if r.get('gpu_idle_mib') else "N/A"
             print(f"{r['input_len']:>7} | {r['concurrency']:>4} | {r['throughput_tok_per_s']:>10.2f} | "
-                  f"{ttft:>8} | {tpot:>8} | {lat:>8} | {r['gpu_peak_mib']:>8} | {r['gpu_delta_gib']:>7.2f}")
+                  f"{ttft:>8} | {tpot:>8} | {lat:>8} | {r['gpu_peak_mib']:>8} | {idle:>8}")
 
     if args.output_json:
         with open(args.output_json, "w") as f:
