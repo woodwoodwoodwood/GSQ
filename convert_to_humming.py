@@ -285,6 +285,9 @@ def write_humming_checkpoint(
     cfg_full = json.loads((in_dir / "config.json").read_text())
     old_qc = cfg_full["quantization_config"]
     ignore = old_qc.get("ignore", [])
+    # vLLM humming uses substring matching for ignore, not regex.
+    # Strip the "re:" prefix that compressed-tensors uses.
+    ignore = [entry[3:] if entry.startswith("re:") else entry for entry in ignore]
 
     # Build a `dynamic` map: regex -> per-layer humming config. Use the layer
     # prefix as an exact-match regex (escaped). The HummingLayer.from_safetensors
@@ -295,7 +298,7 @@ def write_humming_checkpoint(
     # So we use "-:" for per-layer overrides.
     dynamic: Dict[str, Dict] = {}
     for prefix, cfg_l in per_layer_cfg.items():
-        pat = "-:" + re.escape(prefix) + "$"
+        pat = "+:" + re.escape(prefix) + "$"
         dynamic[pat] = cfg_l
 
     # Pick a "default" config from the most-common bitwidth so the top-level
@@ -310,6 +313,7 @@ def write_humming_checkpoint(
                 "output_activations": None,
                 "targets": ["Linear"],
                 "weights": {
+                    "b_dtype": f"uint{most_common_bits}",
                     "dtype": f"uint{most_common_bits}",
                     "group_size": group_size,
                     "has_zero_point": not symmetric_out,

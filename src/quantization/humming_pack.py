@@ -181,6 +181,7 @@ def ct_to_humming(
     }
     schema_config: Dict[str, Any] = {
         "quant_method": "humming",
+        "b_dtype": f"uint{eff_bits}",
         "dtype": f"uint{eff_bits}",
         "group_size": int(group_size),
         "has_zero_point": not symmetric_out,
