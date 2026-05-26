@@ -330,6 +330,9 @@ def write_humming_checkpoint(
         "quant_method": "humming",
         "quantization_status": "compressed",
         "b_dtype": f"uint{most_common_bits}",
+        "group_size": group_size,
+        "has_zero_point": not symmetric_out,
+        "is_fp_zero_point": not symmetric_out,
         "dynamic": dynamic,
     }
     cfg_full["quantization_config"] = top_cfg
