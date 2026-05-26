@@ -1,37 +1,18 @@
 # Minimal reproducer for humming MoE uint2 ILLEGAL_ADDRESS on H20.
-#
-# Background:
-#   - Dense uint2 HummingLayer.forward() works fine on H20.
-#   - vLLM Qwen3-MoE + humming with --quantization humming dies with
-#     CUDA_ERROR_ILLEGAL_ADDRESS during profile_run, in ops.humming_gemm
-#     with both gemm_type="grouped" and gemm_type="indexed".
-#
-# This script bypasses vLLM entirely. It builds a synthetic 128-expert MoE
-# down_proj layer (matching Qwen3-30B-A3B's experts.down_proj shape) with
-# random uint2 weights, generates random MoE routing state via humming's own
-# generate_random_moe_tensors, and calls HummingMethod.forward_layer with
-# GROUPED_CONTIGUOUS / INDEXED gemm_type.
-#
-# Expected outcome:
-#   - On H100: both succeed.
-#   - On H20:  both raise CUDA_ERROR_ILLEGAL_ADDRESS at cuLaunchKernelEx.
+# This script bypasses vLLM and uses REAL packed weights from your checkpoint.
 
 import json
-import os
-import sys
 import torch
+from safetensors import safe_open
 
 from humming import dtypes
 from humming.config import GemmType
 from humming.layer import HummingLayer, HummingMethod
 from humming.schema.humming import HummingWeightSchema
-from humming.utils.test import (
-    generate_random_moe_tensors,
-    generate_random_weight,
-)
+from humming.utils.test import generate_random_moe_tensors
 
-# Qwen3-30B-A3B down_proj shape: N=2048, K=768, group_size=128, b_dtype=uint2
-# num_experts=128, num_experts_per_tok=8
+MODEL_DIR = "/usr/local/app/models/Qwen3-30B-A3B-Instruct-2507-gsq-2bit-humming"
+# down_proj shape:  N=2048, K=768, group_size=128, b_dtype=uint2
 N, K = 2048, 768
 NUM_EXPERTS = 128
 TOP_K = 8
@@ -41,9 +22,8 @@ A_TORCH_DTYPE = torch.bfloat16
 DEVICE = "cuda"
 
 print(f"device: {torch.cuda.get_device_name(0)}")
-print(f"reproducing humming MoE uint2 on N={N} K={K} experts={NUM_EXPERTS} top_k={TOP_K}")
 
-# 1) Build a HummingLayer with num_experts so it provisions per-expert packed weights.
+# 1) Build HummingLayer with num_experts=128 (MoE).
 schema = HummingWeightSchema(
     b_dtype=B_DTYPE,
     weight_scale_group_size=GROUP_SIZE,
@@ -56,48 +36,42 @@ layer = HummingLayer(
     torch_dtype=A_TORCH_DTYPE,
     num_experts=NUM_EXPERTS,
 ).to(DEVICE)
-print("layer constructed; param shapes:")
+print("expected MoE param shapes:")
 for name, p in layer.named_parameters():
     print(f"  {name}: {tuple(p.shape)} {p.dtype}")
-for name, b in layer.named_buffers():
-    print(f"  (buf) {name}: {tuple(b.shape)} {b.dtype}")
 
-# 2) Generate random uint2 weights for all experts.
-torch.manual_seed(0)
-_, _, w_packed, w_scale, *_ = generate_random_weight(
-    n=N, k=K,
-    group_size=GROUP_SIZE,
-    dtype=B_DTYPE,
-    scale_dtype=dtypes.bfloat16,
-    num_experts=NUM_EXPERTS,
-    has_zero_point=True,
-    is_fp_zero_point=True,
-)
-print(f"\nrandom weights: weight={tuple(w_packed.shape)} {w_packed.dtype} "
-      f"scale={tuple(w_scale.shape)} {w_scale.dtype}")
+# 2) Load a real expert's packed weights from your checkpoint, then broadcast
+#    to all 128 experts.
+idx = json.load(open(f"{MODEL_DIR}/model.safetensors.index.json"))["weight_map"]
+prefix = "model.layers.0.mlp.experts.0.down_proj"
+single = {}
+for suf in ["weight", "weight_scale", "zero_point"]:
+    key = f"{prefix}.{suf}"
+    with safe_open(f"{MODEL_DIR}/{idx[key]}", framework="pt", device="cpu") as f:
+        single[suf] = f.get_tensor(key).to(DEVICE)
+    print(f"  single expert {suf}: {tuple(single[suf].shape)} {single[suf].dtype}")
 
-# Manually fill the layer's params (the same fields humming would populate
-# via load_from_tensors). zero_point will be created if has_zero_point=True.
-zp = torch.zeros_like(w_scale)  # random fp zero point
-tensors = {
-    "weight": w_packed,
-    "weight_scale": w_scale,
-    "zero_point": zp,
+# Broadcast to 128 experts (same weights, same scale/zp -- doesn't matter
+# for reproducing a launch crash).
+tensors_moe = {
+    "weight":       single["weight"].unsqueeze(0).expand(NUM_EXPERTS, -1, -1).contiguous(),
+    "weight_scale": single["weight_scale"].unsqueeze(0).expand(NUM_EXPERTS, -1, -1).contiguous(),
+    "zero_point":   single["zero_point"].unsqueeze(0).expand(NUM_EXPERTS, -1, -1).contiguous(),
 }
-layer.load_from_tensors({k: v.to(DEVICE) for k, v in tensors.items()})
+for k, v in tensors_moe.items():
+    print(f"  MoE {k}: {tuple(v.shape)} {v.dtype}")
+
+layer.load_from_tensors(tensors_moe)
 layer.transform()
-print("layer transform OK")
+print("layer transform OK\n")
 
 
 def try_gemm_type(gemm_type: GemmType, shape_m: int):
-    """Try one MoE forward with the given gemm_type and shape_m tokens."""
-    print(f"\n{'=' * 60}")
+    print(f"{'=' * 60}")
     print(f"TRY gemm_type={gemm_type.value} shape_m={shape_m}")
     print(f"{'=' * 60}")
 
-    # Build random topk_ids + the MoE routing tensors humming kernels need.
     if gemm_type == GemmType.INDEXED:
-        # INDEXED needs a block_size param; humming examples use 32 or 64.
         topk_ids, _, sorted_ids, expert_ids, num_tokens_padded = (
             generate_random_moe_tensors(
                 shape_m=shape_m,
@@ -118,20 +92,16 @@ def try_gemm_type(gemm_type: GemmType, shape_m: int):
             )
         )
 
-    print(f"  topk_ids: {tuple(topk_ids.shape)} {topk_ids.dtype}")
+    print(f"  topk_ids: {tuple(topk_ids.shape)}")
     if expert_layout is not None:
         print(f"  expert_layout: {tuple(expert_layout.shape)} {expert_layout.dtype}")
+        print(f"  expert_layout sample: {expert_layout[:8].tolist()} ... {expert_layout[-3:].tolist()}")
     if sorted_ids is not None:
-        print(f"  sorted_ids: {tuple(sorted_ids.shape)} {sorted_ids.dtype}")
-        print(f"  expert_ids: {tuple(expert_ids.shape)} {expert_ids.dtype}")
-        print(f"  num_tokens_padded: {num_tokens_padded.item()}")
+        print(f"  sorted_ids: {tuple(sorted_ids.shape)}  num_tokens_padded={num_tokens_padded.item()}")
 
-    # Input activation matches what vLLM passes to humming MoE.
-    # For GROUPED_CONTIGUOUS, vLLM permutes tokens so each expert's segment
-    # is contiguous; inputs.shape[0] == sum(expert_layout diffs).
     if gemm_type == GemmType.GROUPED_CONTIGUOUS:
-        total_tokens = shape_m * TOP_K  # after permute
-    else:  # INDEXED
+        total_tokens = shape_m * TOP_K
+    else:
         total_tokens = num_tokens_padded.item()
     x = (torch.randn(total_tokens, K, dtype=A_TORCH_DTYPE, device=DEVICE) * 0.05)
     print(f"  input x: {tuple(x.shape)} {x.dtype}")
@@ -163,24 +133,22 @@ def try_gemm_type(gemm_type: GemmType, shape_m: int):
             valid_shape_m=shape_m * TOP_K if gemm_type == GemmType.GROUPED_CONTIGUOUS else 0,
         )
         torch.cuda.synchronize()
-        print(f"  OK: out {tuple(out.shape)} {out.dtype}")
-        print(f"     first 5: {out.flatten()[:5].tolist()}")
-        return True
+        print(f"  OK: out {tuple(out.shape)}  first 5: {out.flatten()[:5].tolist()}")
+        return "OK"
     except RuntimeError as e:
-        print(f"  FAILED: {type(e).__name__}: {e}")
-        return False
+        msg = str(e)[:200]
+        print(f"  FAILED: {type(e).__name__}: {msg}")
+        return f"FAIL ({msg[:80]})"
 
 
-# 3) Run the two MoE paths. Use shape_m that matches vLLM profile_run
-#    (typical batch=1 first, then a larger batch like 16).
 results = {}
 for shape_m in (1, 16):
     for gemm_type in (GemmType.GROUPED_CONTIGUOUS, GemmType.INDEXED):
-        ok = try_gemm_type(gemm_type, shape_m)
-        results[(gemm_type.value, shape_m)] = ok
+        results[(gemm_type.value, shape_m)] = try_gemm_type(gemm_type, shape_m)
+        print()
 
-print(f"\n{'=' * 60}")
+print(f"{'=' * 60}")
 print("SUMMARY")
 print(f"{'=' * 60}")
-for (gt, m), ok in results.items():
-    print(f"  gemm_type={gt:24s} shape_m={m:4d}  {'OK' if ok else 'FAIL'}")
+for (gt, m), r in results.items():
+    print(f"  gemm_type={gt:24s} shape_m={m:4d}  {r}")
