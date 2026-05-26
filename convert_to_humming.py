@@ -329,6 +329,7 @@ def write_humming_checkpoint(
         "ignore": ignore,
         "quant_method": "humming",
         "quantization_status": "compressed",
+        "b_dtype": f"uint{most_common_bits}",
         "dynamic": dynamic,
     }
     cfg_full["quantization_config"] = top_cfg
