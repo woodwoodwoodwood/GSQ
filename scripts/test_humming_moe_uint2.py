@@ -12,7 +12,7 @@ from humming.layer import HummingLayer, HummingMethod
 from humming.schema.humming import HummingWeightSchema
 from humming.utils.test import generate_random_moe_tensors
 
-MODEL_DIR = "/usr/local/app/models/Qwen3-30B-A3B-Instruct-2507-gsq-2bit-humming"
+MODEL_DIR = "/data1/models/Qwen3-30B-A3B-Instruct-2507-gsq-2bit-humming"
 NUM_EXPERTS = 128
 TOP_K = 8
 GROUP_SIZE = 128
