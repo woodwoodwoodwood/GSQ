@@ -36,7 +36,6 @@ dependencies = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["src*"]
-vllm = ["setuptools_scm", "setuptools-rust", "cmake", "ninja", "packaging"]
 
 # ── Pin torch (and friends) to the PyTorch CUDA wheel index ────────────────
 # Default is cu130 to match vLLM 0.20+ which ships a CUDA-13 ABI (its _C.abi3.so
