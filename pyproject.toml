@@ -47,7 +47,7 @@ include = ["src*"]
 # vLLM accordingly: cu128 needs vllm<0.20; cu130 works with vllm>=0.20.
 [[tool.uv.index]]
 name = "pytorch"
-url = "https://download.pytorch.org/whl/cu130"
+url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [tool.uv.sources]
