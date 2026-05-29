@@ -25,7 +25,7 @@ dependencies = [
     "lm-eval[api]",
     "lighteval",
     # Keep torch/torchvision pinned for vLLM 0.20.x compatibility.
-    # vLLM is pinned and sourced from a prebuilt cu128 wheel below.
+    # vLLM is pinned to 0.20.2 and resolved from PyPI.
     "torch==2.11.0",
     "torchvision==0.26.0",
     "vllm==0.20.2",
@@ -54,7 +54,6 @@ explicit = true
 torch = { index = "pytorch" }
 torchvision = { index = "pytorch" }
 torchaudio = { index = "pytorch" }
-# Force prebuilt CUDA 12.8 wheel to avoid local source build failures.
-# Adjust x86_64 -> aarch64 if needed.
-vllm = { url = "https://github.com/vllm-project/vllm/releases/download/v0.20.2/vllm-0.20.2+cu128-cp38-abi3-manylinux_2_35_x86_64.whl" }
+# Use PyPI official wheel source for vLLM.
+# Note: vLLM 0.20.x on PyPI publishes generic manylinux wheels, not +cu128 URLs.
 
