@@ -54,3 +54,8 @@ explicit = true
 torch = { index = "pytorch" }
 torchvision = { index = "pytorch" }
 torchaudio = { index = "pytorch" }
+vllm = { path = "../vllm" }
+
+[tool.uv.extra-build-dependencies]
+vllm = ["setuptools_scm", "setuptools-rust", "cmake", "ninja", "packaging", "torch==2.11.0"]
+
