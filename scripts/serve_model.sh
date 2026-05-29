@@ -42,7 +42,8 @@ EXTRA_VLLM_ARGS="${EXTRA_VLLM_ARGS:---gpu-memory-utilization 0.85 --tokenizer-mo
 
 EVAL="1"
 EVAL_CONFIG_FILE="configs/local/qwen3_30b_a3b_local.yaml"
-EVAL_TASKS="gsm8k,arc_challenge,arc_easy,winogrande,piqa"
+# EVAL_TASKS="gsm8k,arc_challenge,arc_easy,winogrande,piqa"
+EVAL_TASKS="mmlu,hellaswag,humaneval,leaderboard_gpqa_main"
 EVAL_NUM_CONCURRENT="16"
 EVAL_LIMIT=""
 EVAL_OUTPUT_DIR=""

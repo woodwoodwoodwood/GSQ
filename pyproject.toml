@@ -25,7 +25,7 @@ dependencies = [
     "lm-eval[api]",
     "lighteval",
     # Keep torch/torchvision pinned for vLLM 0.20.x compatibility.
-    # vLLM is pinned to 0.20.2 and resolved from PyPI.
+    # vLLM is pinned to 0.20.2 and resolved from PyPI wheel.
     "torch==2.11.0",
     "torchvision==0.26.0",
     "vllm==0.20.2",
@@ -54,6 +54,5 @@ explicit = true
 torch = { index = "pytorch" }
 torchvision = { index = "pytorch" }
 torchaudio = { index = "pytorch" }
-# Use PyPI official wheel source for vLLM.
-# Note: vLLM 0.20.x on PyPI publishes generic manylinux wheels, not +cu128 URLs.
+# Use default source resolution (PyPI) for vLLM; do not build from local source.
 
