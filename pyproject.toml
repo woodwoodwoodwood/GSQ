@@ -25,10 +25,10 @@ dependencies = [
     "lm-eval[api]",
     "lighteval",
     # Keep torch/torchvision pinned for vLLM 0.20.x compatibility.
-    # vLLM itself is sourced from ../vllm via [tool.uv.sources] below.
+    # vLLM is pinned and sourced from a prebuilt cu128 wheel below.
     "torch==2.11.0",
     "torchvision==0.26.0",
-    "vllm>=0.20.2,<0.21",
+    "vllm==0.20.2",
     "ray",
     "ninja"
 ]
@@ -38,13 +38,13 @@ where = ["."]
 include = ["src*"]
 
 # ── Pin torch (and friends) to the PyTorch CUDA wheel index ────────────────
-# Default is cu130 to match vLLM 0.20+ which ships a CUDA-13 ABI (its _C.abi3.so
-# requires libcudart.so.13). To target a different CUDA version, override the
-# index URL at the command line, e.g.:
+# Current default is cu128 to match this machine's driver ceiling.
+# Note: vLLM >=0.20 introduces humming, but official wheels may depend on
+# CUDA 13 runtime (libcudart.so.13). On cu128-only hosts, prefer building
+# vLLM from source against CUDA 12.8 instead of using incompatible wheels.
+# To target a different CUDA version, override index URL at command line, e.g.:
 #   UV_INDEX_PYTORCH=https://download.pytorch.org/whl/cu128 uv sync
-# or pass --index-strategy unsafe-best-match with --index pytorch=<url>.
-# When changing this, also bump TORCH_CUDA in scripts/setup_env.sh and re-pin
-# vLLM accordingly: cu128 needs vllm<0.20; cu130 works with vllm>=0.20.
+# and keep TORCH_CUDA in scripts/setup_env.sh aligned with this index.
 [[tool.uv.index]]
 name = "pytorch"
 url = "https://download.pytorch.org/whl/cu128"
@@ -54,8 +54,7 @@ explicit = true
 torch = { index = "pytorch" }
 torchvision = { index = "pytorch" }
 torchaudio = { index = "pytorch" }
-vllm = { path = "../vllm" }
-
-[tool.uv.extra-build-dependencies]
-vllm = ["setuptools_scm", "setuptools-rust", "cmake", "ninja", "packaging", "numpy", "torch==2.11.0"]
+# Force prebuilt CUDA 12.8 wheel to avoid local source build failures.
+# Adjust x86_64 -> aarch64 if needed.
+vllm = { url = "https://github.com/vllm-project/vllm/releases/download/v0.20.2/vllm-0.20.2+cu128-cp38-abi3-manylinux_2_35_x86_64.whl" }
 
