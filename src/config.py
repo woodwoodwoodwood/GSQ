@@ -77,7 +77,8 @@ class GPTQConfig:
 
 @dataclass
 class EvalConfig:
-    default_tasks: str = "gsm8k,arc_challenge,arc_easy,winogrande,piqa"
+    # default_tasks: str = "gsm8k,arc_challenge,arc_easy,winogrande,piqa,mmlu,hellaswag,humaneval"
+    default_tasks: str = "mmlu,hellaswag,humaneval,gpqa_main"
     ppl_seed: int = 1234
     ppl_max_samples: int = 1000
     test_size: float = 0.2
