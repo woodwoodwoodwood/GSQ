@@ -24,11 +24,11 @@ dependencies = [
     "tiktoken",
     "lm-eval[api]",
     "lighteval",
-    # vLLM 0.20.2 metadata pins torch==2.11.0 and torchvision==0.26.0 exactly;
-    # mirror those constraints here so uv doesn't backtrack vllm to 0.1.2.
+    # Keep torch/torchvision pinned for vLLM 0.20.x compatibility.
+    # vLLM itself is sourced from ../vllm via [tool.uv.sources] below.
     "torch==2.11.0",
     "torchvision==0.26.0",
-    "vllm==0.20.2",
+    "vllm>=0.20.2,<0.21",
     "ray",
     "ninja"
 ]
@@ -57,5 +57,5 @@ torchaudio = { index = "pytorch" }
 vllm = { path = "../vllm" }
 
 [tool.uv.extra-build-dependencies]
-vllm = ["setuptools_scm", "setuptools-rust", "cmake", "ninja", "packaging", "torch==2.11.0"]
+vllm = ["setuptools_scm", "setuptools-rust", "cmake", "ninja", "packaging", "numpy", "torch==2.11.0"]
 
