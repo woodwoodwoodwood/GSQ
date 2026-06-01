@@ -61,3 +61,20 @@ vllm bench serve \
   --save-result \
   --result-dir /data1/models/Qwen3-30B-A3B-Instruct-2507/evals
 
+python benchmark_throughput.py \
+  --backend openai-chat \
+  --host 127.0.0.1 \
+  --port 8902 \
+  --dataset_name customize \
+  --dataset_path /usr/local/app/GSQ/benchmark_input.csv \
+  --col_idx 0 \
+  --mode async \
+  --stream \
+  --concurrency 32 \
+  --request_rate inf \
+  --max_new_tokens 128 \
+  --temperature 0 \
+  --repeat_num_iters 1 \
+  --percentiles 50 90 95 99 \
+  --perf_csv /tmp/fp16_perf.csv \
+  --output_csv /tmp/fp16_output.csv
