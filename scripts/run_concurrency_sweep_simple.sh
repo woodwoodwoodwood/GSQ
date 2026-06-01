@@ -17,7 +17,7 @@ TEMPERATURE="${TEMPERATURE:-0}"
 
 # 默认只扫这两个变量：每个并发仅测 request_rate=concurrency 和 inf
 # 如需自定义，可手动设置 REQUEST_RATE_LIST（例如："16 32 inf"）
-CONCURRENCY_LIST="${CONCURRENCY_LIST:-8 16 24 32 40 48 56 64}"
+CONCURRENCY_LIST="${CONCURRENCY_LIST:-1 8 16 24 32 40 48 56 64}"
 REQUEST_RATE_LIST="${REQUEST_RATE_LIST:-}"
 
 RESULT_DIR="${RESULT_DIR:-/usr/local/app/GSQ/benchmark/vllm_bench_concurrency_only}"
