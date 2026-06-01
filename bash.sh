@@ -1,6 +1,18 @@
 # vllm 启动 GPTQ-Int4 模型
 CUDA_VISIBLE_DEVICES=6 /usr/local/app/GSQ/.venv/bin/vllm serve /data1/models/Qwen3-30B-A3B-GPTQ-Int4 --trust-remote-code --quantization gptq --dtype float16 --port 8900 --max-model-len 4096
 
+CUDA_VISIBLE_DEVICES=6 /usr/local/app/GSQ/.venv/bin/vllm serve /data1/models/Qwen3-30B-A3B-GPTQ-Int4 \
+  --trust-remote-code \
+  --quantization gptq_marlin \
+  --dtype float16 \
+  --host 127.0.0.1 \
+  --port 8900 \
+  --max-model-len 4096 \
+  --gpu-memory-utilization 0.90 \
+  --max-num-seqs 32 \
+  --generation-config vllm
+
+
 # 测试数据集
 export HF_ALLOW_CODE_EVAL=1
 /usr/local/app/GSQ/.venv/bin/python -m lm_eval \
