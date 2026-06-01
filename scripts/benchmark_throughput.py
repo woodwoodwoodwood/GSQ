@@ -7,6 +7,7 @@ Features (similar style to user's script):
 - async/sync modes
 - stream mode TTFT / ITL / TPOT metrics
 - latency percentiles
+- both total token throughput (input+output) and decode token throughput (output-1)
 - CSV outputs (generated text and performance summary)
 
 Examples:
@@ -65,7 +66,8 @@ class BenchmarkMetrics:
     avg_output_chars: float = 0.0
     avg_input_tokens: float = 0.0
     avg_output_tokens: float = 0.0
-    avg_tokens_per_sec: float = 0.0
+    total_token_throughput: float = 0.0
+    decode_token_throughput: float = 0.0
     percentile_latency: List[Tuple[int, float]] = field(default_factory=list)
 
     def __str__(self) -> str:
@@ -79,7 +81,8 @@ class BenchmarkMetrics:
             f"Average output len: {self.avg_output_chars:.3f} chars",
             f"Average input len: {self.avg_input_tokens:.3f} tokens",
             f"Average output len: {self.avg_output_tokens:.3f} tokens",
-            f"Token throughput: {self.avg_tokens_per_sec:.3f} tokens/s",
+            f"Total token throughput (input+output): {self.total_token_throughput:.3f} tokens/s",
+            f"Decode token throughput (output-1): {self.decode_token_throughput:.3f} tokens/s",
         ]
         lines += [f"P{p} latency: {v:.3f} s" for p, v in self.percentile_latency]
         return "\n".join(lines)
@@ -122,7 +125,12 @@ def args_config() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Serving throughput benchmark")
     parser.add_argument("--host", type=str, default="127.0.0.1", help="server host address")
     parser.add_argument("--port", type=str, default="8900", help="server port")
-    parser.add_argument("--dataset_path", type=str, default="benchmark/benchmark_input.csv", help="input csv")
+    parser.add_argument(
+        "--dataset_path",
+        type=str,
+        default="/home/cakejiang/github/GSQ/benchmark/benchmark_input.csv",
+        help="input csv",
+    )
     parser.add_argument("--col_idx", type=int, default=0, help="column index in csv")
     parser.add_argument("--output_csv", type=str, default=None, help="save generated text")
     parser.add_argument("--perf_csv", type=str, default=None, help="save performance csv")
@@ -155,7 +163,11 @@ def args_config() -> argparse.Namespace:
     parser.add_argument("--topp", type=float, default=1.0)
     parser.add_argument("--repetition_penalty", type=float, default=1.0)
     parser.add_argument("--client_timeout", type=int, default=30 * 60)
-    parser.add_argument("--show_decode_token_throughput", action="store_true")
+    parser.add_argument(
+        "--show_decode_token_throughput",
+        action="store_true",
+        help="兼容旧参数：当前版本默认同时输出总吞吐和decode吞吐",
+    )
 
     args = parser.parse_args()
 
@@ -566,14 +578,16 @@ def main(args: argparse.Namespace) -> None:
         metrics.avg_input_tokens = statistics.mean(input_tokens) if input_tokens else 0.0
         metrics.avg_output_tokens = statistics.mean(output_tokens) if output_tokens else 0.0
 
-        summary_token = metrics.avg_input_tokens + metrics.avg_output_tokens
-        if args.show_decode_token_throughput:
-            summary_token = max(metrics.avg_output_tokens - 1, 0)
+        total_summary_token = metrics.avg_input_tokens + metrics.avg_output_tokens
+        decode_summary_token = max(metrics.avg_output_tokens - 1, 0)
 
         if metrics.total_latency > 0 and REQUEST_LATENCY:
-            metrics.avg_tokens_per_sec = summary_token * len(REQUEST_LATENCY) / metrics.total_latency / args.repeat_num_iters
+            factor = len(REQUEST_LATENCY) / metrics.total_latency / args.repeat_num_iters
+            metrics.total_token_throughput = total_summary_token * factor
+            metrics.decode_token_throughput = decode_summary_token * factor
         else:
-            metrics.avg_tokens_per_sec = 0.0
+            metrics.total_token_throughput = 0.0
+            metrics.decode_token_throughput = 0.0
 
         print(metrics)
 
@@ -624,7 +638,8 @@ def main(args: argparse.Namespace) -> None:
             writer = csv.writer(f)
             header = [
                 "Request rate", "Concurrency", "Total latency", "Request throughput", "Avg latency",
-                "Avg input chars", "Avg output chars", "Avg input tokens", "Avg output tokens", "Token throughput",
+                "Avg input chars", "Avg output chars", "Avg input tokens", "Avg output tokens",
+                "Total token throughput (input+output)", "Decode token throughput (output-1)",
             ]
             header.extend([f"P{p} latency" for p in args.percentiles])
             if args.stream:
