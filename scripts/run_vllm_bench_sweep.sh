@@ -24,6 +24,7 @@ NUM_PROMPTS="${NUM_PROMPTS:-128}"
 MAX_CONCURRENCY="${MAX_CONCURRENCY:-32}"
 REQUEST_RATE="${REQUEST_RATE:-inf}"
 NUM_WARMUPS="${NUM_WARMUPS:-8}"
+TEMPERATURE="${TEMPERATURE:-0}"
 RESULT_DIR="${RESULT_DIR:-/usr/local/app/GSQ/benchmark/vllm_bench_fixed}"
 RESULT_FILENAME="${RESULT_FILENAME:-fixed_c32_rinf.json}"
 VENV_PATH="${VENV_PATH:-/usr/local/app/GSQ/.venv}"
@@ -44,7 +45,7 @@ else
 fi
 
 echo "[INFO] Python: $(command -v python)"
-echo "[INFO] Running fixed config: c=${MAX_CONCURRENCY}, r=${REQUEST_RATE}, prompts=${NUM_PROMPTS}"
+echo "[INFO] Running fixed config: c=${MAX_CONCURRENCY}, r=${REQUEST_RATE}, prompts=${NUM_PROMPTS}, temp=${TEMPERATURE}"
 
 'time' "${BENCH_CMD[@]}" \
   --backend "${BACKEND}" \
@@ -57,6 +58,7 @@ echo "[INFO] Running fixed config: c=${MAX_CONCURRENCY}, r=${REQUEST_RATE}, prom
   --max-concurrency "${MAX_CONCURRENCY}" \
   --request-rate "${REQUEST_RATE}" \
   --num-warmups "${NUM_WARMUPS}" \
+  --temperature "${TEMPERATURE}" \
   --save-result \
   --result-dir "${RESULT_DIR}" \
   --result-filename "${RESULT_FILENAME}" \

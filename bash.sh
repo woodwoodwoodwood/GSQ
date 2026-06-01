@@ -41,6 +41,20 @@ export HF_ALLOW_CODE_EVAL=1
 # vllm 启动 fp16 模型
 CUDA_VISIBLE_DEVICES=7 FLASHINFER_DISABLE_VERSION_CHECK=1 /usr/local/app/GSQ/.venv/bin/vllm serve /data1/models/Qwen3-30B-A3B-Instruct-2507 --trust-remote-code --dtype float16 --tensor-parallel-size 1 --host 127.0.0.1 --port 8902 --max-model-len 4096 --gpu-memory-utilization 0.85 --tokenizer-mode hf --max-num-seqs 32
 
+CUDA_VISIBLE_DEVICES=7 FLASHINFER_DISABLE_VERSION_CHECK=1 /usr/local/app/GSQ/.venv/bin/vllm serve /data1/models/Qwen3-30B-A3B-Instruct-2507 \
+  --trust-remote-code \
+  --dtype float16 \
+  --tensor-parallel-size 1 \
+  --host 127.0.0.1 \
+  --port 8902 \
+  --max-model-len 4096 \
+  --gpu-memory-utilization 0.85 \
+  --tokenizer-mode hf \
+  --max-num-seqs 32 \
+  --generation-config vllm
+
+
+
 # 吞吐测试
 
 python /usr/local/app/GSQ/scripts/benchmark_throughput.py \
