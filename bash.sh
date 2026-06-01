@@ -122,3 +122,17 @@ python /usr/local/app/GSQ/scripts/benchmark_speed.py \
   --num-prompts 8 \
   --warmup 1 \
   --output-json /tmp/fp16_longctx_agent.json
+
+python /usr/local/app/GSQ/scripts/benchmark_throughput.py \
+  --host 127.0.0.1 \
+  --port 8902 \
+  --backend openai-chat \
+  --dataset_name customize \
+  --dataset_path /usr/local/app/GSQ/benchmark/benchmark_input.csv \
+  --model_type empty \
+  --stream \
+  --concurrency 8 \
+  --request_rate inf \
+  --max_new_tokens 128 \
+  --prompt_num 96 \
+  --perf_csv /usr/local/app/GSQ/benchmark/perf_throughput.csv
