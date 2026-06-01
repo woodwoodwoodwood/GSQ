@@ -13,17 +13,29 @@ OUTPUT_LEN="${OUTPUT_LEN:-128}"
 NUM_PROMPTS="${NUM_PROMPTS:-512}"
 NUM_WARMUPS="${NUM_WARMUPS:-16}"
 RESULT_DIR="${RESULT_DIR:-/usr/local/app/GSQ/benchmark/vllm_bench}"
+VENV_PATH="${VENV_PATH:-/usr/local/app/GSQ/.venv}"
 
 # 扫描网格
 CONCURRENCY_LIST=(${CONCURRENCY_LIST:-8 16 24 32 48 64})
 REQUEST_RATE_LIST=(${REQUEST_RATE_LIST:-8 16 24 32 48 64 96 128 inf})
 
+if [[ ! -f "${VENV_PATH}/bin/activate" ]]; then
+  echo "[ERROR] venv not found: ${VENV_PATH}"
+  exit 1
+fi
+
+# 强制使用 /usr/local/app/GSQ/.venv（可通过 VENV_PATH 覆盖）
+# shellcheck disable=SC1090
+source "${VENV_PATH}/bin/activate"
+
 mkdir -p "${RESULT_DIR}"
 
 echo "[INFO] Result dir: ${RESULT_DIR}"
 echo "[INFO] Base URL: ${BASE_URL}"
+echo "[INFO] Venv path: ${VENV_PATH}"
+echo "[INFO] Python: $(command -v python)"
 
-# 兼容两种调用方式
+# 在已激活 venv 中优先使用 vllm CLI；若不可用则回退到模块调用
 if command -v vllm >/dev/null 2>&1; then
   BENCH_CMD=(vllm bench serve)
 else
