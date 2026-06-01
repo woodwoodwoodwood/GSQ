@@ -15,9 +15,10 @@ NUM_PROMPTS="${NUM_PROMPTS:-128}"
 NUM_WARMUPS="${NUM_WARMUPS:-8}"
 TEMPERATURE="${TEMPERATURE:-0}"
 
-# 只扫这两个变量
+# 默认只扫这两个变量：每个并发仅测 request_rate=concurrency 和 inf
+# 如需自定义，可手动设置 REQUEST_RATE_LIST（例如："16 32 inf"）
 CONCURRENCY_LIST="${CONCURRENCY_LIST:-8 16 24 32 40 48 56 64}"
-REQUEST_RATE_LIST="${REQUEST_RATE_LIST:-8 16 24 32 48 64 96 128 inf}"
+REQUEST_RATE_LIST="${REQUEST_RATE_LIST:-}"
 
 RESULT_DIR="${RESULT_DIR:-/usr/local/app/GSQ/benchmark/vllm_bench_concurrency_only}"
 RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}"
@@ -42,11 +43,21 @@ mkdir -p "${RESULT_DIR}/${RUN_TAG}"
 echo "[INFO] python=$(command -v python)"
 echo "[INFO] base_url=${BASE_URL}"
 echo "[INFO] concurrency_list=${CONCURRENCY_LIST}"
-echo "[INFO] request_rate_list=${REQUEST_RATE_LIST}"
+if [[ -n "${REQUEST_RATE_LIST}" ]]; then
+  echo "[INFO] request_rate_list=${REQUEST_RATE_LIST} (manual override)"
+else
+  echo "[INFO] request_rate_list=<auto: concurrency,inf>"
+fi
 echo "[INFO] result_dir=${RESULT_DIR}/${RUN_TAG}"
 
 for c in ${CONCURRENCY_LIST}; do
-  for r in ${REQUEST_RATE_LIST}; do
+  if [[ -n "${REQUEST_RATE_LIST}" ]]; then
+    RATE_LIST="${REQUEST_RATE_LIST}"
+  else
+    RATE_LIST="${c} inf"
+  fi
+
+  for r in ${RATE_LIST}; do
     # 约束：仅测试 request_rate >= concurrency（inf 视为满足）
     if [[ "${r}" != "inf" ]] && awk -v rr="${r}" -v cc="${c}" 'BEGIN { exit !(rr < cc) }'; then
       echo "[SKIP] request_rate(${r}) < concurrency(${c})"
