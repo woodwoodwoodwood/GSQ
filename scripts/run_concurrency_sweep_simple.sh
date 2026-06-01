@@ -47,6 +47,12 @@ echo "[INFO] result_dir=${RESULT_DIR}/${RUN_TAG}"
 
 for c in ${CONCURRENCY_LIST}; do
   for r in ${REQUEST_RATE_LIST}; do
+    # 约束：仅测试 request_rate >= concurrency（inf 视为满足）
+    if [[ "${r}" != "inf" ]] && awk -v rr="${r}" -v cc="${c}" 'BEGIN { exit !(rr < cc) }'; then
+      echo "[SKIP] request_rate(${r}) < concurrency(${c})"
+      continue
+    fi
+
     echo
     echo "[INFO] ===== concurrency=${c}, request_rate=${r} ====="
 
