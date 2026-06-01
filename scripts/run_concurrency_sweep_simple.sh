@@ -21,9 +21,25 @@ REQUEST_RATE_LIST="${REQUEST_RATE_LIST:-8 16 24 32 48 64 96 128 inf}"
 
 RESULT_DIR="${RESULT_DIR:-/usr/local/app/GSQ/benchmark/vllm_bench_concurrency_only}"
 RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}"
+VENV_PATH="${VENV_PATH:-/usr/local/app/GSQ/.venv}"
+
+if [[ ! -f "${VENV_PATH}/bin/activate" ]]; then
+  echo "[ERROR] venv not found: ${VENV_PATH}"
+  exit 1
+fi
+
+# shellcheck disable=SC1090
+source "${VENV_PATH}/bin/activate"
+
+if command -v vllm >/dev/null 2>&1; then
+  BENCH_CMD=(vllm bench serve)
+else
+  BENCH_CMD=(python -m vllm.entrypoints.cli.main bench serve)
+fi
 
 mkdir -p "${RESULT_DIR}/${RUN_TAG}"
 
+echo "[INFO] python=$(command -v python)"
 echo "[INFO] base_url=${BASE_URL}"
 echo "[INFO] concurrency_list=${CONCURRENCY_LIST}"
 echo "[INFO] request_rate_list=${REQUEST_RATE_LIST}"
@@ -34,7 +50,7 @@ for c in ${CONCURRENCY_LIST}; do
     echo
     echo "[INFO] ===== concurrency=${c}, request_rate=${r} ====="
 
-    vllm bench serve \
+    "${BENCH_CMD[@]}" \
       --backend "${BACKEND}" \
       --base-url "${BASE_URL}" \
       --endpoint "${ENDPOINT}" \
