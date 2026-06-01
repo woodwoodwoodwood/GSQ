@@ -128,7 +128,7 @@ def args_config() -> argparse.Namespace:
     parser.add_argument(
         "--dataset_path",
         type=str,
-        default="/home/cakejiang/github/GSQ/benchmark/benchmark_input.csv",
+        default="benchmark/benchmark_input.csv",
         help="input csv",
     )
     parser.add_argument("--col_idx", type=int, default=0, help="column index in csv")
