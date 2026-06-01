@@ -42,24 +42,6 @@ export HF_ALLOW_CODE_EVAL=1
 CUDA_VISIBLE_DEVICES=7 FLASHINFER_DISABLE_VERSION_CHECK=1 /usr/local/app/GSQ/.venv/bin/vllm serve /data1/models/Qwen3-30B-A3B-Instruct-2507 --trust-remote-code --dtype float16 --tensor-parallel-size 1 --host 127.0.0.1 --port 8902 --max-model-len 4096 --gpu-memory-utilization 0.85 --tokenizer-mode hf --max-num-seqs 32
 
 # 吞吐测试
-MODEL_ID=$(curl -sS http://127.0.0.1:8902/v1/models | python -c 'import sys,json; print(json.load(sys.stdin)["data"][0]["id"])')
-echo "MODEL_ID=${MODEL_ID}"
-
-vllm bench serve \
-  --backend openai \
-  --base-url http://127.0.0.1:8902 \
-  --model "${MODEL_ID}" \
-  --dataset-name random \
-  --num-prompts 500 \
-  --input-len 1024 \
-  --output-len 128 \
-  --request-rate inf \
-  --max-concurrency 32 \
-  --temperature 0 \
-  --tokenizer /data1/models/Qwen3-30B-A3B-Instruct-2507 \
-  --tokenizer-mode hf \
-  --save-result \
-  --result-dir /data1/models/Qwen3-30B-A3B-Instruct-2507/evals
 
 python /usr/local/app/GSQ/scripts/benchmark_throughput.py \
   --host 127.0.0.1 \
@@ -67,7 +49,7 @@ python /usr/local/app/GSQ/scripts/benchmark_throughput.py \
   --backend openai-chat \
   --dataset_name customize \
   --dataset_path /usr/local/app/GSQ/benchmark/benchmark_input.csv \
-  --model Qwen3-30B-A3B-Instruct-2507 \
+  --model /data1/models/Qwen3-30B-A3B-Instruct-2507 \
   --stream \
   --concurrency 8 \
   --request_rate inf \
@@ -75,3 +57,25 @@ python /usr/local/app/GSQ/scripts/benchmark_throughput.py \
   --prompt_num 96 \
   --perf_csv /usr/local/app/GSQ/benchmark/perf_throughput.csv
 
+
+mkdir -p /usr/local/app/GSQ/benchmark/vllm_bench
+
+for c in 8 16 24 32 48 64; do
+  for r in 8 16 24 32 48 64 96 128 inf; do
+    vllm bench serve \
+      --backend openai-chat \
+      --base-url http://127.0.0.1:8902 \
+      --endpoint /v1/chat/completions \
+      --dataset-name random \
+      --input-len 1024 \
+      --output-len 128 \
+      --num-prompts 512 \
+      --max-concurrency $c \
+      --request-rate $r \
+      --num-warmups 16 \
+      --save-result \
+      --result-dir /usr/local/app/GSQ/benchmark/vllm_bench \
+      --result-filename c${c}_r${r}.json \
+      --disable-tqdm
+  done
+done
