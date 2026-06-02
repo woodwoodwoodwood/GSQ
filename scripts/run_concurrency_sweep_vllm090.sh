@@ -191,7 +191,8 @@ for c in ${CONCURRENCY_LIST}; do
     if has_flag "--backend"; then
       CMD+=(--backend "${BACKEND}")
     elif has_flag "--endpoint-type"; then
-      if [[ "${ENDPOINT}" == *"/chat/completions"* ]]; then
+      # 某些0.9.x仅支持openai-comp（不支持openai-chat）
+      if grep -q "openai-chat" <<<"${HELP_TEXT}" && [[ "${ENDPOINT}" == *"/chat/completions"* ]]; then
         CMD+=(--endpoint-type "openai-chat")
       else
         CMD+=(--endpoint-type "openai-comp")
