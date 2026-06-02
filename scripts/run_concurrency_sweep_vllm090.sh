@@ -30,6 +30,7 @@ SEED="${SEED:-42}"
 MODEL="${MODEL:-}"
 BENCH_MODEL="${BENCH_MODEL:-}"
 TOKENIZER="${TOKENIZER:-}"
+API_KEY="${API_KEY:-}"
 
 CONCURRENCY_LIST="${CONCURRENCY_LIST:-1 8 16 24 32 40 48 56 64}"
 REQUEST_RATE_LIST="${REQUEST_RATE_LIST:-}"
@@ -47,7 +48,7 @@ Optional env overrides:
   BASE_URL, ENDPOINT, BACKEND, DATASET_NAME,
   RANDOM_INPUT_LEN, RANDOM_OUTPUT_LEN,
   NUM_PROMPTS, NUM_WARMUPS, TEMPERATURE, SEED,
-  BENCH_MODEL, TOKENIZER,
+  BENCH_MODEL, TOKENIZER, API_KEY,
   CONCURRENCY_LIST, REQUEST_RATE_LIST,
   RESULT_DIR, RUN_TAG, VENV_PATH
 
@@ -59,6 +60,9 @@ Examples:
   BENCH_MODEL="/data1/models/Qwen3-30B-A3B-GPTQ-Int4" \
   TOKENIZER="/data1/models/Qwen3-30B-A3B-Instruct-2507" \
   bash scripts/run_concurrency_sweep_vllm090.sh --model Qwen3-30B-A3B-GPTQ-Int4
+
+  # 若服务端启用 --api-key，传入API_KEY自动追加Authorization头
+  API_KEY="<your_api_key>" bash scripts/run_concurrency_sweep_vllm090.sh --model Qwen3-30B-A3B-GPTQ-Int4
 EOF
 }
 
@@ -139,6 +143,7 @@ echo "[INFO] python=$(command -v python)"
 echo "[INFO] model=${MODEL}"
 echo "[INFO] bench_model=${BENCH_MODEL}"
 echo "[INFO] tokenizer=${TOKENIZER:-<auto>}"
+echo "[INFO] api_key=$([[ -n "${API_KEY}" ]] && echo "<set>" || echo "<empty>")"
 echo "[INFO] base_url=${BASE_URL}"
 echo "[INFO] endpoint=${ENDPOINT}"
 echo "[INFO] backend=${BACKEND}"
