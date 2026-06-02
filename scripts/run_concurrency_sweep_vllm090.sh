@@ -17,7 +17,7 @@ set -euo pipefail
 # - 并发扫描：1 8 16 24 32 40 48 56 64
 # - 每个并发默认测 request-rate={concurrency, inf}
 
-BASE_URL="${BASE_URL:-http://127.0.0.1:8902}"
+BASE_URL="${BASE_URL:-http://127.0.0.1:8900}"
 ENDPOINT="${ENDPOINT:-/v1/chat/completions}"
 BACKEND="${BACKEND:-openai-chat}"
 DATASET_NAME="${DATASET_NAME:-random}"
