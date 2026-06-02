@@ -116,6 +116,15 @@ has_flag() {
   grep -q -- "${flag}" <<<"${HELP_TEXT}"
 }
 
+# endpoint 兼容：若仅支持 openai-comp 且默认是 chat endpoint，则自动改为 completions
+ENDPOINT_EFFECTIVE="${ENDPOINT}"
+if has_flag "--endpoint-type" \
+  && ! grep -q "openai-chat" <<<"${HELP_TEXT}" \
+  && [[ "${ENDPOINT_EFFECTIVE}" == "/v1/chat/completions" ]]; then
+  ENDPOINT_EFFECTIVE="/v1/completions"
+  echo "[WARN] endpoint-type only supports openai-comp; force endpoint=${ENDPOINT_EFFECTIVE}"
+fi
+
 # base-url 兼容：若不支持 --base-url，则回退 --host/--port
 BASE_URL_ARGS=()
 if has_flag "--base-url"; then
@@ -145,7 +154,7 @@ echo "[INFO] bench_model=${BENCH_MODEL}"
 echo "[INFO] tokenizer=${TOKENIZER:-<auto>}"
 echo "[INFO] api_key=$([[ -n "${API_KEY}" ]] && echo "<set>" || echo "<empty>")"
 echo "[INFO] base_url=${BASE_URL}"
-echo "[INFO] endpoint=${ENDPOINT}"
+echo "[INFO] endpoint=${ENDPOINT_EFFECTIVE}"
 echo "[INFO] backend=${BACKEND}"
 echo "[INFO] dataset=${DATASET_NAME}"
 echo "[INFO] random_input_len=${RANDOM_INPUT_LEN}, random_output_len=${RANDOM_OUTPUT_LEN}"
@@ -192,7 +201,7 @@ for c in ${CONCURRENCY_LIST}; do
       CMD+=(--backend "${BACKEND}")
     elif has_flag "--endpoint-type"; then
       # 某些0.9.x仅支持openai-comp（不支持openai-chat）
-      if grep -q "openai-chat" <<<"${HELP_TEXT}" && [[ "${ENDPOINT}" == *"/chat/completions"* ]]; then
+      if grep -q "openai-chat" <<<"${HELP_TEXT}" && [[ "${ENDPOINT_EFFECTIVE}" == *"/chat/completions"* ]]; then
         CMD+=(--endpoint-type "openai-chat")
       else
         CMD+=(--endpoint-type "openai-comp")
@@ -204,7 +213,7 @@ for c in ${CONCURRENCY_LIST}; do
       CMD+=(--header "Authorization=Bearer ${API_KEY}")
     fi
     CMD+=("${BASE_URL_ARGS[@]}")
-    if has_flag "--endpoint"; then CMD+=(--endpoint "${ENDPOINT}"); fi
+    if has_flag "--endpoint"; then CMD+=(--endpoint "${ENDPOINT_EFFECTIVE}"); fi
     if has_flag "--dataset-name"; then CMD+=(--dataset-name "${DATASET_NAME}"); fi
 
     if has_flag "--random-input-len"; then CMD+=(--random-input-len "${RANDOM_INPUT_LEN}");
