@@ -92,6 +92,34 @@ else
   BENCH_CMD=(python -m vllm.entrypoints.cli.main bench serve)
 fi
 
+HELP_TEXT="$(${BENCH_CMD[@]} --help 2>&1 || true)"
+
+has_flag() {
+  local flag="$1"
+  grep -q -- "${flag}" <<<"${HELP_TEXT}"
+}
+
+# base-url 兼容：若不支持 --base-url，则回退 --host/--port
+BASE_URL_ARGS=()
+if has_flag "--base-url"; then
+  BASE_URL_ARGS=(--base-url "${BASE_URL}")
+else
+  URL_NO_SCHEME="${BASE_URL#http://}"
+  URL_NO_SCHEME="${URL_NO_SCHEME#https://}"
+  URL_HOSTPORT="${URL_NO_SCHEME%%/*}"
+  URL_HOST="${URL_HOSTPORT%%:*}"
+  URL_PORT="${URL_HOSTPORT##*:}"
+  if [[ "${URL_PORT}" == "${URL_HOSTPORT}" ]]; then
+    URL_PORT="8000"
+  fi
+  if has_flag "--host"; then
+    BASE_URL_ARGS+=(--host "${URL_HOST}")
+  fi
+  if has_flag "--port"; then
+    BASE_URL_ARGS+=(--port "${URL_PORT}")
+  fi
+fi
+
 mkdir -p "${RESULT_DIR}/${RUN_TAG}"
 
 echo "[INFO] python=$(command -v python)"
@@ -127,24 +155,33 @@ for c in ${CONCURRENCY_LIST}; do
     echo
     echo "[INFO] ===== concurrency=${c}, request_rate=${r} ====="
 
-    "${BENCH_CMD[@]}" \
-      --model "${MODEL}" \
-      --backend "${BACKEND}" \
-      --base-url "${BASE_URL}" \
-      --endpoint "${ENDPOINT}" \
-      --dataset-name "${DATASET_NAME}" \
-      --random-input-len "${RANDOM_INPUT_LEN}" \
-      --random-output-len "${RANDOM_OUTPUT_LEN}" \
-      --num-prompts "${NUM_PROMPTS}" \
-      --max-concurrency "${c}" \
-      --request-rate "${r}" \
-      --num-warmups "${NUM_WARMUPS}" \
-      --temperature "${TEMPERATURE}" \
-      --seed "${SEED}" \
-      --save-result \
-      --result-dir "${RESULT_DIR}/${RUN_TAG}" \
-      --result-filename "c${c}_r${r}.json" \
-      --disable-tqdm
+    CMD=("${BENCH_CMD[@]}")
+
+    # v0.9 不同小版本参数差异较大：只传当前 help 中存在的参数
+    if has_flag "--model"; then CMD+=(--model "${MODEL}"); fi
+    if has_flag "--backend"; then CMD+=(--backend "${BACKEND}"); fi
+    CMD+=("${BASE_URL_ARGS[@]}")
+    if has_flag "--endpoint"; then CMD+=(--endpoint "${ENDPOINT}"); fi
+    if has_flag "--dataset-name"; then CMD+=(--dataset-name "${DATASET_NAME}"); fi
+
+    if has_flag "--random-input-len"; then CMD+=(--random-input-len "${RANDOM_INPUT_LEN}");
+    elif has_flag "--input-len"; then CMD+=(--input-len "${RANDOM_INPUT_LEN}"); fi
+
+    if has_flag "--random-output-len"; then CMD+=(--random-output-len "${RANDOM_OUTPUT_LEN}");
+    elif has_flag "--output-len"; then CMD+=(--output-len "${RANDOM_OUTPUT_LEN}"); fi
+
+    if has_flag "--num-prompts"; then CMD+=(--num-prompts "${NUM_PROMPTS}"); fi
+    if has_flag "--max-concurrency"; then CMD+=(--max-concurrency "${c}"); fi
+    if has_flag "--request-rate"; then CMD+=(--request-rate "${r}"); fi
+    if has_flag "--num-warmups"; then CMD+=(--num-warmups "${NUM_WARMUPS}"); fi
+    if has_flag "--temperature"; then CMD+=(--temperature "${TEMPERATURE}"); fi
+    if has_flag "--seed"; then CMD+=(--seed "${SEED}"); fi
+    if has_flag "--save-result"; then CMD+=(--save-result); fi
+    if has_flag "--result-dir"; then CMD+=(--result-dir "${RESULT_DIR}/${RUN_TAG}"); fi
+    if has_flag "--result-filename"; then CMD+=(--result-filename "c${c}_r${r}.json"); fi
+    if has_flag "--disable-tqdm"; then CMD+=(--disable-tqdm); fi
+
+    "${CMD[@]}"
   done
 done
 
