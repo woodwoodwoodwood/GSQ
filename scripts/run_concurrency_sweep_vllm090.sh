@@ -181,7 +181,22 @@ for c in ${CONCURRENCY_LIST}; do
     elif has_flag "--skip-tokenizer-init"; then
       CMD+=(--skip-tokenizer-init)
     fi
-    if has_flag "--backend"; then CMD+=(--backend "${BACKEND}"); fi
+
+    # 兼容不同版本字段命名：backend / endpoint-type
+    if has_flag "--backend"; then
+      CMD+=(--backend "${BACKEND}")
+    elif has_flag "--endpoint-type"; then
+      if [[ "${ENDPOINT}" == *"/chat/completions"* ]]; then
+        CMD+=(--endpoint-type "openai-chat")
+      else
+        CMD+=(--endpoint-type "openai-comp")
+      fi
+    fi
+
+    # 若服务端启用API Key鉴权，自动注入Authorization头
+    if [[ -n "${API_KEY}" ]] && has_flag "--header"; then
+      CMD+=(--header "Authorization=Bearer ${API_KEY}")
+    fi
     CMD+=("${BASE_URL_ARGS[@]}")
     if has_flag "--endpoint"; then CMD+=(--endpoint "${ENDPOINT}"); fi
     if has_flag "--dataset-name"; then CMD+=(--dataset-name "${DATASET_NAME}"); fi
