@@ -28,6 +28,8 @@ NUM_WARMUPS="${NUM_WARMUPS:-8}"
 TEMPERATURE="${TEMPERATURE:-0}"
 SEED="${SEED:-42}"
 MODEL="${MODEL:-}"
+BENCH_MODEL="${BENCH_MODEL:-}"
+TOKENIZER="${TOKENIZER:-}"
 
 CONCURRENCY_LIST="${CONCURRENCY_LIST:-1 8 16 24 32 40 48 56 64}"
 REQUEST_RATE_LIST="${REQUEST_RATE_LIST:-}"
@@ -45,12 +47,18 @@ Optional env overrides:
   BASE_URL, ENDPOINT, BACKEND, DATASET_NAME,
   RANDOM_INPUT_LEN, RANDOM_OUTPUT_LEN,
   NUM_PROMPTS, NUM_WARMUPS, TEMPERATURE, SEED,
+  BENCH_MODEL, TOKENIZER,
   CONCURRENCY_LIST, REQUEST_RATE_LIST,
   RESULT_DIR, RUN_TAG, VENV_PATH
 
 Examples:
-  MODEL="/path/or/model_id" bash scripts/run_concurrency_sweep_vllm090.sh
-  bash scripts/run_concurrency_sweep_vllm090.sh --model Qwen3-30B-A3B-Instruct-2507-GPTQ-Int4
+  # 仅传服务端模型名
+  bash scripts/run_concurrency_sweep_vllm090.sh --model Qwen3-30B-A3B-GPTQ-Int4
+
+  # 推荐：显式指定本地路径，避免bench去HF拉tokenizer
+  BENCH_MODEL="/data1/models/Qwen3-30B-A3B-GPTQ-Int4" \
+  TOKENIZER="/data1/models/Qwen3-30B-A3B-Instruct-2507" \
+  bash scripts/run_concurrency_sweep_vllm090.sh --model Qwen3-30B-A3B-GPTQ-Int4
 EOF
 }
 
@@ -85,6 +93,11 @@ fi
 
 # shellcheck disable=SC1090
 source "${VENV_PATH}/bin/activate"
+
+# 如果未显式提供，bench模型默认跟请求模型一致
+if [[ -z "${BENCH_MODEL}" ]]; then
+  BENCH_MODEL="${MODEL}"
+fi
 
 if command -v vllm >/dev/null 2>&1; then
   BENCH_CMD=(vllm bench serve)
@@ -124,6 +137,8 @@ mkdir -p "${RESULT_DIR}/${RUN_TAG}"
 
 echo "[INFO] python=$(command -v python)"
 echo "[INFO] model=${MODEL}"
+echo "[INFO] bench_model=${BENCH_MODEL}"
+echo "[INFO] tokenizer=${TOKENIZER:-<auto>}"
 echo "[INFO] base_url=${BASE_URL}"
 echo "[INFO] endpoint=${ENDPOINT}"
 echo "[INFO] backend=${BACKEND}"
@@ -158,7 +173,14 @@ for c in ${CONCURRENCY_LIST}; do
     CMD=("${BENCH_CMD[@]}")
 
     # v0.9 不同小版本参数差异较大：只传当前 help 中存在的参数
-    if has_flag "--model"; then CMD+=(--model "${MODEL}"); fi
+    # 关键兼容：--model 用 BENCH_MODEL（本地路径/HF id），请求体模型名用 --served-model-name 覆盖
+    if has_flag "--model"; then CMD+=(--model "${BENCH_MODEL}"); fi
+    if has_flag "--served-model-name"; then CMD+=(--served-model-name "${MODEL}"); fi
+    if has_flag "--tokenizer" && [[ -n "${TOKENIZER}" ]]; then
+      CMD+=(--tokenizer "${TOKENIZER}")
+    elif has_flag "--skip-tokenizer-init"; then
+      CMD+=(--skip-tokenizer-init)
+    fi
     if has_flag "--backend"; then CMD+=(--backend "${BACKEND}"); fi
     CMD+=("${BASE_URL_ARGS[@]}")
     if has_flag "--endpoint"; then CMD+=(--endpoint "${ENDPOINT}"); fi
