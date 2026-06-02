@@ -103,6 +103,15 @@ if [[ -z "${BENCH_MODEL}" ]]; then
   BENCH_MODEL="${MODEL}"
 fi
 
+# 若压测目标是本机地址，强制绕过系统代理（避免被Squid拦截）
+BYPASS_PROXY_FOR_LOCAL=0
+if [[ "${BASE_URL}" == http://127.0.0.1* || "${BASE_URL}" == http://localhost* || "${BASE_URL}" == https://127.0.0.1* || "${BASE_URL}" == https://localhost* ]]; then
+  BYPASS_PROXY_FOR_LOCAL=1
+  unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY
+  export NO_PROXY="${NO_PROXY:-127.0.0.1,localhost}"
+  export no_proxy="${no_proxy:-127.0.0.1,localhost}"
+fi
+
 if command -v vllm >/dev/null 2>&1; then
   BENCH_CMD=(vllm bench serve)
 else
@@ -155,6 +164,7 @@ echo "[INFO] tokenizer=${TOKENIZER:-<auto>}"
 echo "[INFO] api_key=$([[ -n "${API_KEY}" ]] && echo "<set>" || echo "<empty>")"
 echo "[INFO] base_url=${BASE_URL}"
 echo "[INFO] endpoint=${ENDPOINT_EFFECTIVE}"
+echo "[INFO] bypass_proxy_for_local=${BYPASS_PROXY_FOR_LOCAL}"
 echo "[INFO] backend=${BACKEND}"
 echo "[INFO] dataset=${DATASET_NAME}"
 echo "[INFO] random_input_len=${RANDOM_INPUT_LEN}, random_output_len=${RANDOM_OUTPUT_LEN}"
