@@ -37,6 +37,20 @@ export HF_ALLOW_CODE_EVAL=1
 CUDA_VISIBLE_DEVICES=7 FLASHINFER_DISABLE_VERSION_CHECK=1 /usr/local/app/GSQ/.venv/bin/vllm serve /data1/models/Qwen3-30B-A3B-Instruct-2507-gsq-2bit-humming --trust-remote-code --quantization humming --tensor-parallel-size 1 --host 127.0.0.1 --port 8901 --max-model-len 4096 --gpu-memory-utilization 0.85 --tokenizer-mode hf --max-num-seqs 32
 # CUDA_VISIBLE_DEVICES=6 FLASHINFER_DISABLE_VERSION_CHECK=1 PYTHONPATH=/usr/local/app/vllm-0.21.0-fresh /usr/local/app/GSQ/.venv/bin/python -m vllm serve /data1/models/Qwen3-30B-A3B-Instruct-2507-gsq-2bit-humming --trust-remote-code --quantization humming --tensor-parallel-size 1 --host 127.0.0.1 --port 8900 --max-model-len 4096 --gpu-memory-utilization 0.85 --tokenizer-mode hf --max-num-seqs 32
 
+# 1) 启动服务（示例：humming）
+CUDA_VISIBLE_DEVICES=7 FLASHINFER_DISABLE_VERSION_CHECK=1 /usr/local/app/GSQ/.venv/bin/vllm serve /data1/models/xxx \
+  --trust-remote-code \
+  --quantization humming \
+  --tensor-parallel-size 1 \
+  --host 127.0.0.1 \
+  --port 8901 \
+  --max-model-len 4096 \
+  --gpu-memory-utilization 0.85 \
+  --tokenizer-mode hf \
+  --max-num-seqs 32 \
+  --generation-config vllm
+
+
 # 测试数据集
 export HF_ALLOW_CODE_EVAL=1
 /usr/local/app/GSQ/.venv/bin/python -m lm_eval \

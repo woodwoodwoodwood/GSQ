@@ -14,6 +14,7 @@ OUTPUT_LEN="${OUTPUT_LEN:-128}"
 NUM_PROMPTS="${NUM_PROMPTS:-128}"
 NUM_WARMUPS="${NUM_WARMUPS:-8}"
 TEMPERATURE="${TEMPERATURE:-0}"
+MODEL="${MODEL:-}"
 
 # 默认只扫这两个变量：每个并发仅测 request_rate=concurrency 和 inf
 # 如需自定义，可手动设置 REQUEST_RATE_LIST（例如："16 32 inf"）
@@ -23,6 +24,27 @@ REQUEST_RATE_LIST="${REQUEST_RATE_LIST:-}"
 RESULT_DIR="${RESULT_DIR:-/usr/local/app/GSQ/benchmark/vllm_bench_concurrency_only}"
 RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}"
 VENV_PATH="${VENV_PATH:-/usr/local/app/GSQ/.venv}"
+
+# 仅支持最小必要参数，避免与环境变量冲突
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --model)
+      MODEL="$2"
+      shift 2
+      ;;
+    *)
+      echo "[ERROR] unknown arg: $1"
+      echo "Usage: $0 --model <served-model-name-or-id>"
+      exit 2
+      ;;
+  esac
+done
+
+if [[ -z "${MODEL}" ]]; then
+  echo "[ERROR] --model is required (or set MODEL env)"
+  echo "Usage: $0 --model <served-model-name-or-id>"
+  exit 2
+fi
 
 if [[ ! -f "${VENV_PATH}/bin/activate" ]]; then
   echo "[ERROR] venv not found: ${VENV_PATH}"
@@ -41,6 +63,7 @@ fi
 mkdir -p "${RESULT_DIR}/${RUN_TAG}"
 
 echo "[INFO] python=$(command -v python)"
+echo "[INFO] model=${MODEL}"
 echo "[INFO] base_url=${BASE_URL}"
 echo "[INFO] concurrency_list=${CONCURRENCY_LIST}"
 if [[ -n "${REQUEST_RATE_LIST}" ]]; then
@@ -68,6 +91,7 @@ for c in ${CONCURRENCY_LIST}; do
     echo "[INFO] ===== concurrency=${c}, request_rate=${r} ====="
 
     "${BENCH_CMD[@]}" \
+      --model "${MODEL}" \
       --backend "${BACKEND}" \
       --base-url "${BASE_URL}" \
       --endpoint "${ENDPOINT}" \
