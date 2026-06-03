@@ -216,6 +216,13 @@ class DeepseekV4Wrapper(Qwen3MoeWrapper):
         name = re.sub(r"(?<=\.)w3(?=\.|$)", "up_proj", name)
         name = re.sub(r"(?<=\.)w2(?=\.|$)", "down_proj", name)
 
+        # Hyper-connection naming aliases across DeepSeek HF variants.
+        # ckpt may use `hc_attn_base` / `hc_ffn_base`, while some HF impls expose
+        # `attn_hc` / `ffn_hc`.
+        name = re.sub(r"(?<=\.)hc_attn_base(?=\.|$)", "attn_hc", name)
+        name = re.sub(r"(?<=\.)hc_ffn_base(?=\.|$)", "ffn_hc", name)
+        name = re.sub(r"(?<=\.)hc_mlp_base(?=\.|$)", "ffn_hc", name)
+
         return name
 
     # ------------------------------------------------------------------ #
