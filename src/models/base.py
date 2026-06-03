@@ -349,9 +349,13 @@ class BaseModelWrapper(ABC):
         if isinstance(prefixes, str):
             prefixes = [prefixes]
 
+        def _match_prefix(name, p):
+            return name == p or name.startswith(p + ".")
+
         def wanted(name):
+            model_name = self._ckpt_to_model_name(name)
             for p in prefixes:
-                if name == p or name.startswith(p + "."):
+                if _match_prefix(name, p) or _match_prefix(model_name, p):
                     return True
             return False
 
