@@ -482,7 +482,7 @@ class BaseModelWrapper(ABC):
         if skipped_names:
             print(
                 f"[BaseModelWrapper] WARNING: skipped {len(skipped_names)} unmapped tensor key(s). "
-                f"Examples: {skipped_names[:4]}"
+                f"All: {skipped_names}"
             )
 
         # Sanity: warn if any pending pairs are still incomplete.

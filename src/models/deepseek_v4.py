@@ -169,6 +169,21 @@ class DeepseekV4Wrapper(Qwen3MoeWrapper):
         self._install_bf16_fused_experts()
         self._patch_moe_forward_if_needed()
 
+        # One-time debug dump: list real parameter / buffer names of layer 0
+        # so missing alias mappings can be diagnosed without container access.
+        try:
+            layer0 = self.get_layer_module(0)
+            param_names = [n for n, _ in layer0.named_parameters(recurse=True)]
+            buffer_names = [n for n, _ in layer0.named_buffers(recurse=True)]
+            print(
+                f"[DeepseekV4Wrapper] layer0 params ({len(param_names)}): {param_names}"
+            )
+            print(
+                f"[DeepseekV4Wrapper] layer0 buffers ({len(buffer_names)}): {buffer_names}"
+            )
+        except Exception as _e:
+            print(f"[DeepseekV4Wrapper] WARNING: failed to dump layer0 names: {_e}")
+
     def _detect_moe_block_attr(self):
         for layer in self._layers_module:
             # 先看直接属性（最快）
