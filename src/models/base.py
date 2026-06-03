@@ -500,6 +500,13 @@ class BaseModelWrapper(ABC):
                         break
 
             if hidden_states is None:
+                input_ids = kwargs.get("input_ids", None)
+                if torch.is_tensor(input_ids):
+                    emb = self.model.get_input_embeddings()
+                    if emb is not None:
+                        hidden_states = emb(input_ids.to(device=emb.weight.device, dtype=torch.long))
+
+            if hidden_states is None:
                 got_shapes = [tuple(a.shape) for a in args if torch.is_tensor(a)]
                 raise RuntimeError(
                     f"store_input_hook failed to locate hidden_states. "
@@ -508,14 +515,16 @@ class BaseModelWrapper(ABC):
                 )
 
             batch_n = min(hidden_states.shape[0], end - start)
-            data_dict['input'][start:start + batch_n] = hidden_states[:batch_n]
+            data_dict['input'][start:start + batch_n] = hidden_states[:batch_n].to(data_dict['input'].dtype).cpu()
             cache['index'] += 1
 
             for k, v in kwargs.items():
                 if k == "attention_mask":
                     if v is not None:
                         self._attention_mask_1 = v.detach().cpu()
-                elif k not in ("hidden_states", "past_key_values", "past_key_value"):
+                elif k not in (
+                    "hidden_states", "past_key_values", "past_key_value", "input_ids", "output_router_logits"
+                ):
                     self.kwargs[k] = v
             raise ValueError
             
