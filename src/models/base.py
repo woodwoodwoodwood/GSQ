@@ -407,28 +407,42 @@ class BaseModelWrapper(ABC):
 
                     # ----- FP8 dense online dequant path ----- #
                     if self.fp8_dense:
-                        # Buffer ``.scale`` keys (companion to a ``.weight``).
+                        # Handle both arrival orders with a unified pending format:
+                        # self._fp8_pending[base_key] = {"weight": Tensor?, "scale": Tensor?}
                         if model_name.endswith(".scale"):
-                            self._fp8_pending[model_name] = f.get_tensor(ckpt_name)
+                            base_key = model_name[: -len(".scale")]
+                            entry = self._fp8_pending.setdefault(base_key, {})
+                            if not isinstance(entry, dict):
+                                entry = {"scale": entry}
+                                self._fp8_pending[base_key] = entry
+                            entry["scale"] = f.get_tensor(ckpt_name)
+                            if "weight" in entry:
+                                from src.quant_utils import dequantize_fp8_to_dtype
+                                deq = dequantize_fp8_to_dtype(entry["weight"], entry["scale"], out_dtype=self.dtype)
+                                set_module_tensor_to_device(
+                                    self.model, base_key + ".weight", self.device,
+                                    value=deq, dtype=self.dtype,
+                                )
+                                del self._fp8_pending[base_key]
                             continue
 
-                        # For ``.weight`` keys, check if the tensor is FP8
-                        # and if a paired scale exists.
                         if model_name.endswith(".weight"):
                             t = f.get_tensor(ckpt_name)
                             if t.dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
-                                scale_key = model_name.rsplit(".weight", 1)[0] + ".scale"
-                                scale_t = self._fp8_pending.pop(scale_key, None)
-                                if scale_t is not None:
+                                base_key = model_name[: -len(".weight")]
+                                entry = self._fp8_pending.setdefault(base_key, {})
+                                if not isinstance(entry, dict):
+                                    entry = {"scale": entry}
+                                    self._fp8_pending[base_key] = entry
+                                entry["weight"] = t
+                                if "scale" in entry:
                                     from src.quant_utils import dequantize_fp8_to_dtype
-                                    t = dequantize_fp8_to_dtype(t, scale_t, out_dtype=self.dtype)
-                                else:
-                                    # No scale found – best-effort: upcast directly.
-                                    t = t.to(self.dtype)
-                                set_module_tensor_to_device(
-                                    self.model, model_name, self.device,
-                                    value=t, dtype=self.dtype,
-                                )
+                                    deq = dequantize_fp8_to_dtype(entry["weight"], entry["scale"], out_dtype=self.dtype)
+                                    set_module_tensor_to_device(
+                                        self.model, model_name, self.device,
+                                        value=deq, dtype=self.dtype,
+                                    )
+                                    del self._fp8_pending[base_key]
                                 continue
                             # Not FP8 → fall through to normal loading.
 
