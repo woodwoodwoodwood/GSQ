@@ -23,7 +23,7 @@ model:
   dtype: "bfloat16"
 
 data:
-  dataset_name: "open_thoughts"
+  dataset_name: "c4"
   batch_size: 64
   num_samples: 128
   max_length: 4096

@@ -18,6 +18,31 @@ def split_thought_solution(text: str):
 
     return thought, solution
 
+
+def _render_messages_without_chat_template(messages):
+    role_map = {
+        "system": "System",
+        "user": "User",
+        "assistant": "Assistant",
+    }
+    lines = []
+    for msg in messages:
+        role = role_map.get(msg.get("role", ""), str(msg.get("role", "")).capitalize())
+        content = str(msg.get("content", "")).strip()
+        reasoning = str(msg.get("reasoning_content", "")).strip()
+        if reasoning:
+            lines.append(f"{role}: <think>{reasoning}</think>\n{content}")
+        else:
+            lines.append(f"{role}: {content}")
+    return "\n\n".join(lines)
+
+
+def _safe_apply_chat_template(tokenizer, messages):
+    chat_template = getattr(tokenizer, "chat_template", None)
+    if chat_template:
+        return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
+    return _render_messages_without_chat_template(messages)
+
 def _get_dist_info():
     import os
     import torch.distributed as dist
@@ -215,7 +240,7 @@ def open_thoughts(tokenizer, batch_size, train_samples, val_samples, gpt_samples
                     thought, solution = split_thought_solution(msg["value"])
                     messages.append({"role": "assistant", "content": solution, "reasoning_content": thought})
 
-            return {"text": tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)}
+            return {"text": _safe_apply_chat_template(tokenizer, messages)}
 
         print(f"Preprocessing {len(ds)} OpenThoughts samples (chat template)...", flush=True)
         ds = ds.map(preprocess, num_proc=min(8, os.cpu_count() or 1))
@@ -277,8 +302,7 @@ def mixed(tokenizer, batch_size, train_samples, val_samples, gpt_samples, num_wo
                     thought, solution = split_thought_solution(msg["value"])
                     messages.append({"role": "assistant", "content": solution, "reasoning_content": thought})
 
-            return {"text": tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
-            }
+            return {"text": _safe_apply_chat_template(tokenizer, messages)}
 
         ds = ds.map(preprocess, remove_columns=ds.column_names, num_proc=min(8, os.cpu_count() or 1))
 
