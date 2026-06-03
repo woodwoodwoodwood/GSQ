@@ -12,6 +12,22 @@ CUDA_VISIBLE_DEVICES=6 /usr/local/app/GSQ/.venv/bin/vllm serve /data1/models/Qwe
   --max-num-seqs 32 \
   --generation-config vllm
 
+# 压测 benchmark vllm 0.9.0
+cd /usr/local/app/GSQ && http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= all_proxy= ALL_PROXY= NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost BASE_URL="http://127.0.0.1:8900" ENDPOINT="/v1/chat/completions" DATASET_NAME="random" RANDOM_INPUT_LEN=1024 RANDOM_OUTPUT_LEN=128 NUM_PROMPTS=128 NUM_WARMUPS=8 CONCURRENCY_LIST="1 8 16 24 32 40 48 56 64" BENCH_MODEL="/data1/models/Qwen3-30B-A3B-GPTQ-Int4" TOKENIZER="/data1/models/Qwen3-30B-A3B-Instruct-2507" bash /usr/local/app/GSQ/scripts/run_concurrency_sweep_vllm090.sh --model /data1/models/Qwen3-30B-A3B-GPTQ-Int4
+
+CUDA_VISIBLE_DEVICES=6 vllm serve /data1/models/Qwen3-30B-A3B-GPTQ-Int4 \
+  --trust-remote-code \
+  --quantization gptq_marlin \
+  --dtype float16 \
+  --host 127.0.0.1 \
+  --port 8900 \
+  --max-model-len 4096 \
+  --gpu-memory-utilization 0.90 \
+  --max-num-seqs 32 \
+  --generation-config vllm \
+  --disable-log-requests \
+  --disable-uvicorn-access-log
+
 
 # 测试数据集
 export HF_ALLOW_CODE_EVAL=1

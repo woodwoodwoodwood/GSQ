@@ -21,13 +21,40 @@ from src.prior.gptq import GPTQ, rtn_quantize
 from src.utils.progress_reporter import report_gptq_calib, report_gptq_linear
 
 class BaseModelWrapper(ABC):
-    def __init__(self, model_name, tokenizer, batch_size, seqlen, device, dtype, dummy=False):
+    def __init__(self, model_name, tokenizer, batch_size, seqlen, device, dtype,
+                 dummy=False, strip_quantization_config=False):
         self.ckpt_path = self.resolve_model_path(model_name)
         self.dtype = self.normalize_dtype(dtype)
         self.device = device
         self.save_dir = None
 
         cfg = AutoConfig.from_pretrained(self.ckpt_path, trust_remote_code=True)
+
+        # When the source checkpoint is quantized in a foreign format (e.g.
+        # MXFP4 for DeepSeek-V4-Flash), the embedded ``quantization_config``
+        # would force ``from_config`` to materialize uint8/packed storage.
+        # Stripping it lets us build a vanilla BF16/FP16 model and perform
+        # online dequantization while loading the weights.
+        if strip_quantization_config:
+            for sub_cfg in (cfg, getattr(cfg, "text_config", None)):
+                if sub_cfg is None:
+                    continue
+                for attr in ("quantization_config", "quantization", "compression_config",
+                             "expert_dtype"):
+                    if getattr(sub_cfg, attr, None) is not None:
+                        try:
+                            setattr(sub_cfg, attr, None)
+                        except (AttributeError, TypeError):
+                            # Frozen dataclass / __slots__: fall back to
+                            # __dict__ manipulation so we actually strip it.
+                            if hasattr(sub_cfg, "__dict__"):
+                                sub_cfg.__dict__[attr] = None
+                            else:
+                                raise RuntimeError(
+                                    f"Cannot strip '{attr}' from "
+                                    f"{type(sub_cfg).__name__}"
+                                ) from None
+
         # HF only sets _attn_implementation on the top-level config; propagate to
         # sub-configs so decoder layers pick up DeepseekV3FlashAttention2.
         if hasattr(cfg, 'text_config') and cfg.text_config is not None:
@@ -105,12 +132,38 @@ class BaseModelWrapper(ABC):
         self.fused_experts = False
         self.fused_expert_intermediate_size = None
 
+        # When ``True``, ``_set_tensors`` will pair ``...experts.{e}.w{1,2,3}.weight``
+        # (uint8 packed E2M1 nibbles) with ``..scale`` (uint8 UE8M0 block
+        # scales) and dequantize on-the-fly to ``self.dtype`` before writing
+        # them into the fused BF16 expert slots. Subclasses (e.g.
+        # ``DeepseekV4Wrapper``) flip this on.
+        self.mxfp4_experts = False
+        # Internal buffer used to pair packed/scale tensors that may arrive in
+        # any order while iterating safetensors keys.
+        self._mxfp4_pending = {}
+
+        # When ``True``, ``_set_tensors`` will also detect FP8 E4M3 dense
+        # linear weights (``float8_e4m3fn``) paired with ``.scale`` tensors
+        # (UE8M0), dequantize on-the-fly, and write BF16 into the model.
+        # Subclasses (e.g. ``DeepseekV4Wrapper``) flip this on.
+        self.fp8_dense = False
+        self._fp8_pending = {}
+
     _FUSED_EXPERT_WEIGHT_KEY_RE = re.compile(
         r"^(.+\.layers\.\d+)\.mlp\.experts\.(\d+)\.(gate_proj|up_proj|down_proj)\.weight$"
     )
     _FUSED_EXPERT_MODULE_RE = re.compile(
         r"^(.+\.layers\.\d+)\.mlp\.experts\.(\d+)\.(gate_proj|up_proj|down_proj)$"
     )
+
+    # DeepSeek-style naming: ``w1`` (gate_proj), ``w3`` (up_proj), ``w2`` (down_proj),
+    # with companion ``.weight_scale`` (DeepSeek-V3) or ``.scale`` (DeepSeek-V4-Flash)
+    # tensor for MXFP4 block scales. The MoE submodule may be named ``mlp`` (Qwen)
+    # or ``ffn`` (DeepSeek-V4); the leading ``model.`` prefix is also optional.
+    _MXFP4_FUSED_EXPERT_KEY_RE = re.compile(
+        r"^(.*layers\.\d+)\.(?:mlp|ffn)\.experts\.(\d+)\.(w1|w2|w3)\.(weight|weight_scale|scale)$"
+    )
+    _MXFP4_PROJ_ALIAS = {"w1": "gate_proj", "w2": "down_proj", "w3": "up_proj"}
 
     def _parse_fused_expert_weight_param_name(self, name):
         m = self._FUSED_EXPERT_WEIGHT_KEY_RE.match(name)
@@ -124,6 +177,45 @@ class BaseModelWrapper(ABC):
             return m.group(1), int(m.group(2)), m.group(3)
         return None
 
+    def _parse_mxfp4_expert_key(self, name):
+        """Match ``...experts.{e}.w{1,2,3}.{weight,weight_scale,scale}``.
+
+        Returns ``(layer_prefix, expert_idx, canonical_proj_kind, kind)`` where
+        ``canonical_proj_kind`` is one of ``gate_proj``/``up_proj``/``down_proj``
+        and ``kind`` is normalized to ``"weight"`` or ``"weight_scale"``.
+        """
+        m = self._MXFP4_FUSED_EXPERT_KEY_RE.match(name)
+        if not m:
+            return None
+        layer_prefix = m.group(1)
+        expert_idx = int(m.group(2))
+        proj_kind = self._MXFP4_PROJ_ALIAS[m.group(3)]
+        raw_kind = m.group(4)
+        kind = "weight_scale" if raw_kind in ("weight_scale", "scale") else "weight"
+        return layer_prefix, expert_idx, proj_kind, kind
+
+    def _try_dequant_mxfp4_pending(self, key):
+        """If both packed weight and scale tensors for ``key`` are buffered,
+        dequantize and write the BF16 result into the fused expert slot.
+        """
+        entry = self._mxfp4_pending.get(key)
+        if entry is None:
+            return
+        if "weight" not in entry or "weight_scale" not in entry:
+            return
+        layer_prefix, expert_idx, proj_kind = key
+        packed = entry["weight"]
+        scales = entry["weight_scale"]
+
+        from src.quant_utils import dequantize_mxfp4_to_dtype
+
+        deq = dequantize_mxfp4_to_dtype(packed, scales, out_dtype=self.dtype)
+        self._write_fused_expert_slice(layer_prefix, expert_idx, proj_kind, deq)
+
+        # Free intermediate tensors aggressively; expert weights are large.
+        del self._mxfp4_pending[key]
+        del packed, scales, deq
+
     def _ensure_fused_expert_param_materialized(self, param_name):
         param_name = param_name.replace(".language_model", "")
         params = dict(self.model.named_parameters())
@@ -135,11 +227,33 @@ class BaseModelWrapper(ABC):
         zeros = torch.zeros(p.shape, dtype=self.dtype, device=self.device)
         set_module_tensor_to_device(self.model, param_name, self.device, value=zeros, dtype=self.dtype)
 
+    def _fused_experts_module_path(self, layer_prefix):
+        """Return the dotted submodule path of the fused experts container.
+
+        Default convention is Qwen-MoE: ``{layer_prefix}.mlp.experts``.
+        Subclasses (e.g. DeepSeek-V4 with ``ffn``) can override.
+        """
+        return f"{layer_prefix}.mlp.experts"
+
+    def _ckpt_to_model_name(self, ckpt_name: str) -> str:
+        """Map a safetensors checkpoint key to the model's internal param name.
+
+        The default implementation only strips ``.language_model`` prefixes.
+        Subclasses should override when the checkpoint uses a different naming
+        convention from the HF model (e.g. DeepSeek-V4 uses ``layers.X`` in
+        the checkpoint but the model has ``model.layers.X``).
+        """
+        return ckpt_name.replace(".language_model", "")
+
     def _write_fused_expert_slice(self, layer_prefix, expert_idx, proj_kind, tensor_value):
         if self.fused_expert_intermediate_size is None:
             raise RuntimeError("fused_expert_intermediate_size must be set when fused_experts=True")
         intermediate_dim = self.fused_expert_intermediate_size
-        experts_path = f"{layer_prefix}.mlp.experts"
+        # ``layer_prefix`` comes from checkpoint naming (e.g. ``layers.42``).
+        # Map to model-internal naming (e.g. ``model.layers.42``) so that
+        # ``get_submodule`` can find it.
+        experts_path_ckpt = self._fused_experts_module_path(layer_prefix)
+        experts_path = self._ckpt_to_model_name(experts_path_ckpt)
         gate_up_name = f"{experts_path}.gate_up_proj"
         down_name = f"{experts_path}.down_proj"
         self._ensure_fused_expert_param_materialized(gate_up_name)
@@ -234,6 +348,10 @@ class BaseModelWrapper(ABC):
             self._materialize_to_device(name_shard_pairs)
             return
 
+        # Clear per-layer pending buffers from any previous layer.
+        self._mxfp4_pending.clear()
+        self._fp8_pending.clear()
+
         by_shard = {}
         for n, s in name_shard_pairs:
             by_shard.setdefault(s, []).append(n)
@@ -243,8 +361,47 @@ class BaseModelWrapper(ABC):
                 for ckpt_name in names:
                     if ckpt_name.endswith("inv_freq"):
                         continue
+                    model_name = self._ckpt_to_model_name(ckpt_name)
+
+                    # ----- MXFP4 online dequant path (MoE experts) ----- #
+                    if self.mxfp4_experts and self.fused_experts:
+                        mx = self._parse_mxfp4_expert_key(ckpt_name)
+                        if mx is not None:
+                            layer_prefix, eid, proj, kind = mx
+                            t = f.get_tensor(ckpt_name)
+                            key = (layer_prefix, eid, proj)
+                            self._mxfp4_pending.setdefault(key, {})[kind] = t
+                            self._try_dequant_mxfp4_pending(key)
+                            continue
+
+                    # ----- FP8 dense online dequant path ----- #
+                    if self.fp8_dense:
+                        # Buffer ``.scale`` keys (companion to a ``.weight``).
+                        if model_name.endswith(".scale"):
+                            self._fp8_pending[model_name] = f.get_tensor(ckpt_name)
+                            continue
+
+                        # For ``.weight`` keys, check if the tensor is FP8
+                        # and if a paired scale exists.
+                        if model_name.endswith(".weight"):
+                            t = f.get_tensor(ckpt_name)
+                            if t.dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
+                                scale_key = model_name.rsplit(".weight", 1)[0] + ".scale"
+                                scale_t = self._fp8_pending.pop(scale_key, None)
+                                if scale_t is not None:
+                                    from src.quant_utils import dequantize_fp8_to_dtype
+                                    t = dequantize_fp8_to_dtype(t, scale_t, out_dtype=self.dtype)
+                                else:
+                                    # No scale found – best-effort: upcast directly.
+                                    t = t.to(self.dtype)
+                                set_module_tensor_to_device(
+                                    self.model, model_name, self.device,
+                                    value=t, dtype=self.dtype,
+                                )
+                                continue
+                            # Not FP8 → fall through to normal loading.
+
                     t = f.get_tensor(ckpt_name)
-                    model_name = ckpt_name.replace(".language_model", "")
                     if self.fused_experts:
                         parsed = self._parse_fused_expert_weight_param_name(model_name)
                         if parsed:
@@ -252,6 +409,23 @@ class BaseModelWrapper(ABC):
                             self._write_fused_expert_slice(layer_prefix, eid, proj, t)
                             continue
                     set_module_tensor_to_device(self.model, model_name, self.device, value=t, dtype=t.dtype)
+
+        # Sanity: warn if any pending pairs are still incomplete.
+        if self.mxfp4_experts and self._mxfp4_pending:
+            stale = list(self._mxfp4_pending.keys())[:4]
+            print(
+                f"[BaseModelWrapper] WARNING: {len(self._mxfp4_pending)} MXFP4 expert "
+                f"tensor(s) had no matching weight/scale partner. Examples: {stale}"
+            )
+            self._mxfp4_pending.clear()
+
+        if self.fp8_dense and self._fp8_pending:
+            stale = list(self._fp8_pending.keys())[:4]
+            print(
+                f"[BaseModelWrapper] WARNING: {len(self._fp8_pending)} FP8 scale "
+                f"tensor(s) had no matching weight partner. Examples: {stale}"
+            )
+            self._fp8_pending.clear()
 
     def move_layer_to_gpu(self, layer_name):
         prefixes = self._layer_prefixes(layer_name)

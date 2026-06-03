@@ -1,0 +1,73 @@
+# DeepSeek-V4-Flash GSQ 2-bit production config
+#
+# This config drives ONLINE dequantization while loading the safetensors
+# checkpoint, so you can point ``model.name`` at the original DeepSeek-V4-Flash
+# MXFP4/F8 checkpoint directly. No offline reconstruction is required.
+#
+# The checkpoint contains two quantization formats:
+#   - Dense layers (attention, shared_experts): FP8 E4M3 + UE8M0 block scales
+#   - MoE experts: MXFP4 (E2M1 packed) + UE8M0 block scales
+#
+# Implementation entry points:
+#   - src/quant_utils/mxfp4.py             (pure-PyTorch MXFP4 dequant)
+#   - src/quant_utils/fp8.py               (pure-PyTorch FP8 dequant)
+#   - src/models/base.py::_set_tensors     (pairs weight/scale for both formats
+#                                           and dequants on the fly)
+#   - src/models/deepseek_v4.py            (strips quant config, installs BF16
+#                                           fused expert containers, patches MoE
+#                                           forward, maps ckpt→model prefixes)
+
+model:
+  name: "/path/to/deepseek-v4-flash"
+  device: "cuda"
+  dtype: "bfloat16"
+
+data:
+  dataset_name: "open_thoughts"
+  batch_size: 64
+  num_samples: 128
+  max_length: 4096
+  num_workers: 8
+  val_samples: 128
+
+quantization:
+  gsq_bits: 2
+  init_method: "gptq"
+  gsq_enabled: true
+  start_layer: 0
+  self_attn: false
+  std: 0.01
+  temperature: [2, 0.05]
+  scale: [100, 500]
+  groupsize: 128
+  strength: 6
+  logits_dtype: "bfloat16"
+
+training:
+  num_epochs: 10
+  device_microbatch_size: 4
+  masks_lr: 0.0002
+  signs_lr: 0.0001
+  scales_lr: 0.0001
+  weight_decay: 1.0
+  checkpoint_dir: "checkpoints/deepseek-v4-flash-2bit"
+  log_dir: "logs/deepseek-v4-flash-2bit"
+  act_cache_dir: "cache/act_cache"
+  eval_baseline: true
+
+gptq:
+  nsamples: 512
+  wbits: 2
+  sym: true
+  trits: false
+  percdamp: 0.1
+  blocksize: 128
+  groupsize: 128
+  static_groups: false
+  prunen: 0
+  prunem: 0
+
+wandb:
+  enabled: false
+  entity: "ist"
+  project: "GSQ-multi"

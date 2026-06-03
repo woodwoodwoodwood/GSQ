@@ -505,6 +505,25 @@ def get_model_wrapper(model_name, tokenizer, batch_size, seqlen, device, dtype, 
     elif 'gemma-4-31b' in name_lower:
         from src.models.gemma4 import Gemma4Wrapper
         return Gemma4Wrapper(model_name, tokenizer, batch_size, seqlen, device, dtype)
+    elif 'deepseek-v4' in name_lower or 'deepseek_v4' in name_lower or 'deepseek' in name_lower:
+        from transformers import AutoConfig as _AC
+        _cfg = _AC.from_pretrained(model_name, trust_remote_code=True)
+        _tc = getattr(_cfg, 'text_config', _cfg)
+        _is_moe = (
+            hasattr(_tc, 'n_routed_experts')
+            or hasattr(_tc, 'num_experts')
+            or hasattr(_tc, 'num_local_experts')
+        )
+        if _is_moe and world_size > 1:
+            from src.models.deepseek_v4_dist import DeepseekV4DistributedWrapper
+            return DeepseekV4DistributedWrapper(model_name, tokenizer, batch_size, seqlen, device, dtype)
+        elif _is_moe:
+            from src.models.deepseek_v4 import DeepseekV4Wrapper
+            return DeepseekV4Wrapper(model_name, tokenizer, batch_size, seqlen, device, dtype)
+        else:
+            raise ValueError(
+                f"DeepSeek-V4 currently only supports MoE path: {model_name}"
+            )
     else:
         raise ValueError(f"Unsupported model family: {model_name}")
 
