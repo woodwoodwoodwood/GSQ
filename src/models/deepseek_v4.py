@@ -139,6 +139,9 @@ class DeepseekV4Wrapper(Qwen3MoeWrapper):
             )
         self.num_layers = len(self._layers_module)
 
+        # HF实现中MoE块名可能是`ffn`或`mlp`，需在运行时探测。
+        self._MOE_BLOCK_ATTR = self._detect_moe_block_attr()
+
         self.is_moe = True
         self.fused_experts = True
         self.fused_expert_intermediate_size = (
