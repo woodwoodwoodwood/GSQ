@@ -302,9 +302,16 @@ class DeepseekV4Wrapper(Qwen3MoeWrapper):
             name = re.sub(r"(?<=\.)self_attn(?=\.|$)", "attention", name)
             name = re.sub(r"(?<=\.)attn(?=\.|$)", "attention", name)
 
+        # Norm alias across variants.
+        # DeepSeek ckpt commonly uses `attn_norm` / `ffn_norm`.
+        name = re.sub(r"(?<=\.)attn_norm(?=\.|$)", "input_layernorm", name)
+        name = re.sub(r"(?<=\.)ffn_norm(?=\.|$)", "post_attention_layernorm", name)
+
         # Hyper-connection naming aliases across DeepSeek HF variants.
-        target_attn_hc = self._HC_ATTN_ATTR or "attn_hc"
-        target_ffn_hc = self._HC_FFN_ATTR or "ffn_hc"
+        # If runtime probing found no HC attr, keep original checkpoint names
+        # (do not force-convert to non-existing aliases).
+        target_attn_hc = self._HC_ATTN_ATTR or "hc_attn_base"
+        target_ffn_hc = self._HC_FFN_ATTR or "hc_ffn_base"
         for src in ("hc_attn_base", "attn_hc", "hc_attn"):
             name = re.sub(rf"(?<=\.){re.escape(src)}(?=\.|$)", target_attn_hc, name)
         for src in ("hc_ffn_base", "hc_mlp_base", "ffn_hc", "mlp_hc"):
