@@ -235,6 +235,18 @@ class DeepseekV4Wrapper(Qwen3MoeWrapper):
 
         return name
 
+    def _map_segment_if_exists(self, name: str, src: str, candidates):
+        """Replace dotted segment `src` by the first candidate yielding an existing tensor name."""
+        if not re.search(rf"(?<=\.){re.escape(src)}(?=\.|$)", name):
+            return name
+
+        for cand in candidates:
+            trial = re.sub(rf"(?<=\.){re.escape(src)}(?=\.|$)", cand, name)
+            resolved = self._resolve_existing_tensor_name(trial)
+            if resolved in self._model_tensor_names:
+                return resolved
+        return name
+
     # ------------------------------------------------------------------ #
     # Checkpoint → model name mapping                                    #
     # ------------------------------------------------------------------ #
@@ -306,6 +318,18 @@ class DeepseekV4Wrapper(Qwen3MoeWrapper):
         # DeepSeek ckpt commonly uses `attn_norm` / `ffn_norm`.
         name = re.sub(r"(?<=\.)attn_norm(?=\.|$)", "input_layernorm", name)
         name = re.sub(r"(?<=\.)ffn_norm(?=\.|$)", "post_attention_layernorm", name)
+
+        # Attention projection aliases across implementations.
+        # Keep original token first; fallback to common HF names if needed.
+        name = self._map_segment_if_exists(name, "wq_a", ["wq_a", "q_a_proj", "q_proj_a", "q_a"])
+        name = self._map_segment_if_exists(name, "wq_b", ["wq_b", "q_b_proj", "q_proj_b", "q_b"])
+        name = self._map_segment_if_exists(name, "wkv", ["wkv", "kv_a_proj_with_mqa", "kv_a_proj", "kv_proj"])
+        name = self._map_segment_if_exists(name, "wo_a", ["wo_a", "o_a_proj", "o_proj_a"])
+        name = self._map_segment_if_exists(name, "wo_b", ["wo_b", "o_b_proj", "o_proj_b", "o_proj"])
+
+        # Attention norm aliases.
+        name = self._map_segment_if_exists(name, "q_norm", ["q_norm", "q_a_layernorm", "q_layernorm"])
+        name = self._map_segment_if_exists(name, "kv_norm", ["kv_norm", "kv_a_layernorm", "k_layernorm"])
 
         # Hyper-connection naming aliases across DeepSeek HF variants.
         # If runtime probing found no HC attr, keep original checkpoint names

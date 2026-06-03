@@ -443,11 +443,11 @@ class BaseModelWrapper(ABC):
                             if "weight" in entry:
                                 from src.quant_utils import dequantize_fp8_to_dtype
                                 deq = dequantize_fp8_to_dtype(entry["weight"], entry["scale"], out_dtype=self.dtype)
-                                set_module_tensor_to_device(
-                                    self.model, base_key + ".weight", self.device,
-                                    value=deq, dtype=self.dtype,
+                                ok = _safe_set_model_tensor(
+                                    base_key + ".weight", deq, self.dtype,
                                 )
-                                del self._fp8_pending[base_key]
+                                if ok:
+                                    del self._fp8_pending[base_key]
                             continue
 
                         if model_name.endswith(".weight"):
@@ -462,11 +462,11 @@ class BaseModelWrapper(ABC):
                                 if "scale" in entry:
                                     from src.quant_utils import dequantize_fp8_to_dtype
                                     deq = dequantize_fp8_to_dtype(entry["weight"], entry["scale"], out_dtype=self.dtype)
-                                    set_module_tensor_to_device(
-                                        self.model, model_name, self.device,
-                                        value=deq, dtype=self.dtype,
+                                    ok = _safe_set_model_tensor(
+                                        model_name, deq, self.dtype,
                                     )
-                                    del self._fp8_pending[base_key]
+                                    if ok:
+                                        del self._fp8_pending[base_key]
                                 continue
                             # Not FP8 → fall through to normal loading.
 
