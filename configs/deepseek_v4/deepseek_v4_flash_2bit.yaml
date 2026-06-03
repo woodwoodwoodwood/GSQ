@@ -24,11 +24,11 @@ model:
 
 data:
   dataset_name: "c4"
-  batch_size: 64
-  num_samples: 128
-  max_length: 4096
+  batch_size: 16
+  num_samples: 32
+  max_length: 1024
   num_workers: 8
-  val_samples: 128
+  val_samples: 32
 
 quantization:
   gsq_bits: 2
@@ -55,7 +55,7 @@ training:
   eval_baseline: true
 
 gptq:
-  nsamples: 512
+  nsamples: 64
   wbits: 2
   sym: true
   trits: false
