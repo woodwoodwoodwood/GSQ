@@ -52,7 +52,7 @@ training:
   checkpoint_dir: "checkpoints/deepseek-v4-flash-2bit"
   log_dir: "logs/deepseek-v4-flash-2bit"
   act_cache_dir: "cache/act_cache"
-  eval_baseline: true
+  eval_baseline: false
 
 gptq:
   nsamples: 64
