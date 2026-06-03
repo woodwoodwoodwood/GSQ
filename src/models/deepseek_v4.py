@@ -465,6 +465,49 @@ class DeepseekV4Wrapper(Qwen3MoeWrapper):
         return out
 
     # ------------------------------------------------------------------ #
+    # MoE routing (DeepSeek-V4 HashRouter signature compatibility)       #
+    # ------------------------------------------------------------------ #
+    def _route_tokens_flat(self, mlp_input_batch):
+        import inspect
+
+        layer = self.get_layer_module(self.current_layer_idx)
+        B, T, H = mlp_input_batch.shape
+        hidden = layer.post_attention_layernorm(mlp_input_batch)
+        x_flat = hidden.reshape(B * T, H)
+        moe_block = getattr(layer, self._MOE_BLOCK_ATTR)
+        router = moe_block.gate
+
+        # Some DeepSeek-V4 routers (HashRouter) require `input_ids`.
+        sig_params = list(inspect.signature(router.forward).parameters.keys())
+        flat_hidden = hidden.reshape(-1, H)
+        if "input_ids" in sig_params:
+            dummy_input_ids = torch.arange(
+                flat_hidden.shape[0], device=flat_hidden.device, dtype=torch.long
+            )
+            router_out = router(flat_hidden, dummy_input_ids)
+        else:
+            router_out = router(flat_hidden)
+
+        # Normalize router output into (logits?, topw, topi).
+        if isinstance(router_out, tuple) and len(router_out) == 3:
+            _, topw, topi = router_out
+        elif isinstance(router_out, tuple) and len(router_out) == 2:
+            topw, topi = router_out
+        else:
+            raise RuntimeError(
+                f"Unexpected router output of len={len(router_out) if isinstance(router_out, tuple) else 'NA'} "
+                f"for {type(router).__name__}"
+            )
+
+        top_k = getattr(router, "top_k", None) or getattr(router, "num_experts_per_tok", None)
+        if top_k is None:
+            top_k = topi.shape[-1]
+        tok_idx_flat = torch.arange(B * T, device=self.device, dtype=torch.long).repeat_interleave(top_k)
+        eid_flat = topi.reshape(-1).to(torch.long)
+        w_flat = topw.reshape(-1).to(self.dtype)
+        return x_flat, tok_idx_flat, eid_flat, w_flat, hidden
+
+    # ------------------------------------------------------------------ #
     # Online dequant scaffolding                                         #
     # ------------------------------------------------------------------ #
     def _install_bf16_fused_experts(self):
