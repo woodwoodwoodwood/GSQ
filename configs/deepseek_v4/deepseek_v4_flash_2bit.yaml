@@ -24,10 +24,10 @@ model:
 
 data:
   dataset_name: "c4"
-  batch_size: 16
-  num_samples: 32
-  max_length: 1024
-  num_workers: 8
+  batch_size: 32
+  num_samples: 128
+  max_length: 2048
+  num_workers: 4
   val_samples: 32
 
 quantization:
@@ -44,7 +44,7 @@ quantization:
   logits_dtype: "bfloat16"
 
 training:
-  num_epochs: 10
+  num_epochs: 5
   device_microbatch_size: 4
   lr1: 0.0002
   lr2: 0.0001
@@ -55,7 +55,7 @@ training:
   eval_baseline: false
 
 gptq:
-  nsamples: 64
+  nsamples: 128
   wbits: 2
   sym: true
   trits: false
