@@ -387,6 +387,22 @@ class BaseModelWrapper(ABC):
         for n, s in name_shard_pairs:
             by_shard.setdefault(s, []).append(n)
 
+        skipped_names = []
+
+        def _safe_set_model_tensor(model_name, value, dtype):
+            try:
+                set_module_tensor_to_device(
+                    self.model, model_name, self.device, value=value, dtype=dtype
+                )
+                return True
+            except ValueError as e:
+                # 某些HF版本与ckpt命名存在差异，映射后可能仍落到模块名而非参数名。
+                if "does not have a parameter or a buffer named" in str(e):
+                    if len(skipped_names) < 8:
+                        skipped_names.append(model_name)
+                    return False
+                raise
+
         for shard, names in by_shard.items():
             with safe_open(shard, framework="pt", device=str(self.device)) as f:
                 for ckpt_name in names:
@@ -453,7 +469,13 @@ class BaseModelWrapper(ABC):
                             layer_prefix, eid, proj = parsed
                             self._write_fused_expert_slice(layer_prefix, eid, proj, t)
                             continue
-                    set_module_tensor_to_device(self.model, model_name, self.device, value=t, dtype=t.dtype)
+                    _safe_set_model_tensor(model_name, t, t.dtype)
+
+        if skipped_names:
+            print(
+                f"[BaseModelWrapper] WARNING: skipped {len(skipped_names)} unmapped tensor key(s). "
+                f"Examples: {skipped_names[:4]}"
+            )
 
         # Sanity: warn if any pending pairs are still incomplete.
         if self.mxfp4_experts and self._mxfp4_pending:
@@ -472,9 +494,8 @@ class BaseModelWrapper(ABC):
                 if isinstance(entry, dict):
                     if "weight" in entry and "scale" not in entry:
                         t = entry["weight"].to(self.dtype)
-                        set_module_tensor_to_device(
-                            self.model, base_key + ".weight", self.device,
-                            value=t, dtype=self.dtype,
+                        _safe_set_model_tensor(
+                            base_key + ".weight", t, self.dtype,
                         )
                         upcast_fallback += 1
                     else:
