@@ -34,6 +34,7 @@ Pipeline:
 
 from __future__ import annotations
 
+import re
 import torch
 import torch.nn as nn
 
@@ -206,6 +207,14 @@ class DeepseekV4Wrapper(Qwen3MoeWrapper):
             name = name.replace(".ffn.", ".mlp.")
         elif self._MOE_BLOCK_ATTR == "ffn":
             name = name.replace(".mlp.", ".ffn.")
+
+        # DeepSeek MLP-family aliases: w1/w3/w2 -> gate/up/down_proj.
+        # Use segment-level regex mapping so it covers:
+        # - *.w{1,2,3}.weight / .bias / .scale / .weight_scale
+        # - potential trailing token forms ending with .w{1,2,3}
+        name = re.sub(r"(?<=\.)w1(?=\.|$)", "gate_proj", name)
+        name = re.sub(r"(?<=\.)w3(?=\.|$)", "up_proj", name)
+        name = re.sub(r"(?<=\.)w2(?=\.|$)", "down_proj", name)
 
         return name
 
