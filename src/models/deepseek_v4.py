@@ -216,6 +216,11 @@ class DeepseekV4Wrapper(Qwen3MoeWrapper):
         name = re.sub(r"(?<=\.)w3(?=\.|$)", "up_proj", name)
         name = re.sub(r"(?<=\.)w2(?=\.|$)", "down_proj", name)
 
+        # Attention block alias across variants:
+        # some ckpt variants use `.attn.` while HF modules are usually `.self_attn.`.
+        # Use segment-level replacement to avoid touching names like `attn_hc`.
+        name = re.sub(r"(?<=\.)attn(?=\.|$)", "self_attn", name)
+
         # Hyper-connection naming aliases across DeepSeek HF variants.
         # ckpt may use `hc_attn_base` / `hc_ffn_base`, while some HF impls expose
         # `attn_hc` / `ffn_hc`.

@@ -402,6 +402,14 @@ class BaseModelWrapper(ABC):
                         skipped_names.append(model_name)
                     return False
                 raise
+            except AttributeError as e:
+                # accelerate在逐段getattr路径时，若中间子模块不存在会抛AttributeError
+                # （例如 layer.attn.* 但实际是 layer.self_attn.*）。
+                if "has no attribute" in str(e):
+                    if len(skipped_names) < 8:
+                        skipped_names.append(model_name)
+                    return False
+                raise
 
         for shard, names in by_shard.items():
             with safe_open(shard, framework="pt", device=str(self.device)) as f:
