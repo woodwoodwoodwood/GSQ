@@ -402,6 +402,36 @@ class DeepseekV4Wrapper(Qwen3MoeWrapper):
             return False
         return (layer_idx + 1) % self.decoder_sparse_step == 0
 
+    def _materialize_layer_meta_tensors(self, layer_name):
+        """Best-effort: ensure current layer has no residual meta tensors."""
+        layer_idx = int(layer_name.split(".")[-1])
+        layer = self.get_layer_module(layer_idx)
+        layer_prefix = f"{self.layer_prefix}.{layer_idx}"
+
+        # Named parameters
+        for local_name, p in layer.named_parameters(recurse=True):
+            if p.device.type != "meta":
+                continue
+            full_name = f"{layer_prefix}.{local_name}" if local_name else layer_prefix
+            full_name = self._resolve_existing_tensor_name(full_name)
+            fill_dtype = p.dtype if p.dtype is not None else self.dtype
+            zeros = torch.zeros(p.shape, dtype=fill_dtype, device=self.device)
+            set_module_tensor_to_device(self.model, full_name, self.device, value=zeros, dtype=fill_dtype)
+
+        # Named buffers
+        for local_name, b in layer.named_buffers(recurse=True):
+            if b.device.type != "meta":
+                continue
+            full_name = f"{layer_prefix}.{local_name}" if local_name else layer_prefix
+            full_name = self._resolve_existing_tensor_name(full_name)
+            fill_dtype = b.dtype if b.dtype is not None else self.dtype
+            zeros = torch.zeros(b.shape, dtype=fill_dtype, device=self.device)
+            set_module_tensor_to_device(self.model, full_name, self.device, value=zeros, dtype=fill_dtype)
+
+    def move_layer_to_gpu(self, layer_name):
+        super().move_layer_to_gpu(layer_name)
+        self._materialize_layer_meta_tensors(layer_name)
+
     def _layer_prefixes(self, layer_name):
         layer_idx = int(layer_name.split(".")[-1])
         base = f"{self.layer_prefix}.{layer_idx}"
