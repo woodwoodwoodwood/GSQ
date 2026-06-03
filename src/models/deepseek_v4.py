@@ -158,11 +158,21 @@ class DeepseekV4Wrapper(Qwen3MoeWrapper):
 
     def _detect_moe_block_attr(self):
         for layer in self._layers_module:
-            if hasattr(layer, "ffn"):
-                return "ffn"
+            # 先看直接属性（最快）
             if hasattr(layer, "mlp"):
                 return "mlp"
-        return "ffn"
+            if hasattr(layer, "ffn"):
+                return "ffn"
+
+            # 再看子模块命名（兼容包装层）
+            submods = dict(layer.named_children())
+            if "mlp" in submods:
+                return "mlp"
+            if "ffn" in submods:
+                return "ffn"
+
+        # 保守默认：多数HF实现更常见mlp。
+        return "mlp"
 
     # ------------------------------------------------------------------ #
     # Checkpoint → model name mapping                                    #
