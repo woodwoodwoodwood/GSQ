@@ -69,6 +69,10 @@ class _FusedBF16Experts(nn.Module):
         self.intermediate_size = intermediate_size
         self.hidden_size = hidden_size
 
+        # SwiGLU activation, matches DeepSeek expert MLP convention
+        # (`act_fn(gate) * up`).
+        self.act_fn = nn.SiLU()
+
         # Stay on meta until weights are materialized by ``_set_tensors``.
         self.gate_up_proj = nn.Parameter(
             torch.empty(num_experts, 2 * intermediate_size, hidden_size,
