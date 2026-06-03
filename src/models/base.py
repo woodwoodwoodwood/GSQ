@@ -451,11 +451,30 @@ class BaseModelWrapper(ABC):
             self._mxfp4_pending.clear()
 
         if self.fp8_dense and self._fp8_pending:
-            stale = list(self._fp8_pending.keys())[:4]
-            print(
-                f"[BaseModelWrapper] WARNING: {len(self._fp8_pending)} FP8 scale "
-                f"tensor(s) had no matching weight partner. Examples: {stale}"
-            )
+            # Best-effort fallback: if a pending entry has FP8 weight but no scale,
+            # upcast and load it to avoid leaving meta parameters behind.
+            upcast_fallback = 0
+            for base_key, entry in list(self._fp8_pending.items()):
+                if "weight" in entry and "scale" not in entry:
+                    t = entry["weight"].to(self.dtype)
+                    set_module_tensor_to_device(
+                        self.model, base_key + ".weight", self.device,
+                        value=t, dtype=self.dtype,
+                    )
+                    upcast_fallback += 1
+                    del self._fp8_pending[base_key]
+
+            if self._fp8_pending:
+                stale = list(self._fp8_pending.keys())[:4]
+                print(
+                    f"[BaseModelWrapper] WARNING: {len(self._fp8_pending)} FP8 tensor pair(s) "
+                    f"incomplete (missing weight or scale). Examples: {stale}"
+                )
+            elif upcast_fallback > 0:
+                print(
+                    f"[BaseModelWrapper] WARNING: {upcast_fallback} FP8 weight tensor(s) had no scale; "
+                    f"loaded via direct upcast fallback."
+                )
             self._fp8_pending.clear()
 
     def move_layer_to_gpu(self, layer_name):
