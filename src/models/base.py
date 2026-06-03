@@ -487,10 +487,30 @@ class BaseModelWrapper(ABC):
         def store_input_hook(_, args, kwargs):
             start = cache['index'] * self.batch_size
             end = min(start + self.batch_size, data_dict['input'].shape[0])
-            if isinstance(args, tuple):
-                args = args[0]
-            data_dict['input'][start:end] = args
+
+            target = data_dict['input'][start:end]
+            expected_dim = target.dim()
+            expected_last_dim = target.shape[-1]
+
+            hidden_states = kwargs.get("hidden_states", None)
+            if hidden_states is None:
+                for a in args:
+                    if torch.is_tensor(a) and a.dim() == expected_dim and a.shape[-1] == expected_last_dim:
+                        hidden_states = a
+                        break
+
+            if hidden_states is None:
+                got_shapes = [tuple(a.shape) for a in args if torch.is_tensor(a)]
+                raise RuntimeError(
+                    f"store_input_hook failed to locate hidden_states. "
+                    f"expected_dim={expected_dim}, expected_last_dim={expected_last_dim}, "
+                    f"positional_tensor_shapes={got_shapes}, kwarg_keys={list(kwargs.keys())}"
+                )
+
+            batch_n = min(hidden_states.shape[0], end - start)
+            data_dict['input'][start:start + batch_n] = hidden_states[:batch_n]
             cache['index'] += 1
+
             for k, v in kwargs.items():
                 if k == "attention_mask":
                     if v is not None:
@@ -510,7 +530,12 @@ class BaseModelWrapper(ABC):
                 print(f"  get_inputs: {batch_idx + 1}/{total_batches} batches", flush=True)
         handle.remove()
 
-        self.kwargs["position_embeddings"] = (self.kwargs["position_embeddings"][0][0].unsqueeze(0), self.kwargs["position_embeddings"][1][0].unsqueeze(0))
+        pos_emb = self.kwargs.get("position_embeddings", None)
+        if isinstance(pos_emb, (tuple, list)) and len(pos_emb) >= 2:
+            self.kwargs["position_embeddings"] = (
+                pos_emb[0][0].unsqueeze(0),
+                pos_emb[1][0].unsqueeze(0),
+            )
 
     def _build_layer_inputs(self, batch_size):
         """Build kwargs dict for a layer forward, expanding attention_mask to batch_size."""
