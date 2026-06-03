@@ -37,6 +37,7 @@ from __future__ import annotations
 import re
 import torch
 import torch.nn as nn
+from accelerate.utils import set_module_tensor_to_device
 
 from .base import BaseModelWrapper
 from .qwen3_moe import Qwen3MoeWrapper
