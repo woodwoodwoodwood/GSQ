@@ -102,7 +102,7 @@ class _FusedBF16Experts(nn.Module):
 class DeepseekV4Wrapper(Qwen3MoeWrapper):
     """GSQ wrapper for DeepSeek-V4-Flash with online dequantization."""
 
-    # Class-level configuration for naming differences vs Qwen-MoE.
+    # Runtime-resolved MoE block attribute ("ffn" or "mlp").
     _MOE_BLOCK_ATTR = "ffn"
 
     def __init__(self, model_name, tokenizer, batch_size, seqlen, device, dtype):
@@ -156,6 +156,14 @@ class DeepseekV4Wrapper(Qwen3MoeWrapper):
         self._install_bf16_fused_experts()
         self._patch_moe_forward_if_needed()
 
+    def _detect_moe_block_attr(self):
+        for layer in self._layers_module:
+            if hasattr(layer, "ffn"):
+                return "ffn"
+            if hasattr(layer, "mlp"):
+                return "mlp"
+        return "ffn"
+
     # ------------------------------------------------------------------ #
     # Checkpoint → model name mapping                                    #
     # ------------------------------------------------------------------ #
@@ -179,6 +187,12 @@ class DeepseekV4Wrapper(Qwen3MoeWrapper):
             if name.endswith(ckpt_suffix):
                 name = name[: -len(ckpt_suffix)] + model_suffix
                 break
+
+        # Normalize MoE block naming across HF variants.
+        if self._MOE_BLOCK_ATTR == "mlp":
+            name = name.replace(".ffn.", ".mlp.")
+        elif self._MOE_BLOCK_ATTR == "ffn":
+            name = name.replace(".mlp.", ".ffn.")
 
         return name
 

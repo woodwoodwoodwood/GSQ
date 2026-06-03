@@ -51,6 +51,9 @@ class DeepseekV4DistributedWrapper(DeepseekV4Wrapper, Qwen3MoeDistributedWrapper
             )
         self.num_layers = len(self._layers_module)
 
+        # HF implementations may expose MoE block as `ffn` or `mlp`.
+        self._MOE_BLOCK_ATTR = self._detect_moe_block_attr()
+
         self.is_moe = True
         self.fused_experts = True
         self.fused_expert_intermediate_size = (
