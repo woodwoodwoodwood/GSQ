@@ -140,8 +140,12 @@ class DeepseekV4Wrapper(Qwen3MoeWrapper):
             )
         self.num_layers = len(self._layers_module)
 
-        # HF实现中MoE块名可能是`ffn`或`mlp`，需在运行时探测。
+        # HF实现中子模块命名可能随版本变化，运行时探测真实字段名。
         self._MOE_BLOCK_ATTR = self._detect_moe_block_attr()
+        self._ATTN_BLOCK_ATTR = self._detect_attn_block_attr()
+        self._HC_ATTN_ATTR = self._detect_optional_layer_attr(["attn_hc", "hc_attn_base", "hc_attn"])
+        self._HC_FFN_ATTR = self._detect_optional_layer_attr(["ffn_hc", "hc_ffn_base", "hc_mlp_base", "mlp_hc"])
+        self._refresh_model_tensor_name_cache()
 
         self.is_moe = True
         self.fused_experts = True
@@ -178,6 +182,59 @@ class DeepseekV4Wrapper(Qwen3MoeWrapper):
         # 保守默认：多数HF实现更常见mlp。
         return "mlp"
 
+    def _detect_attn_block_attr(self):
+        for layer in self._layers_module:
+            if hasattr(layer, "self_attn"):
+                return "self_attn"
+            if hasattr(layer, "attn"):
+                return "attn"
+            if hasattr(layer, "attention"):
+                return "attention"
+            submods = dict(layer.named_children())
+            for cand in ("self_attn", "attn", "attention"):
+                if cand in submods:
+                    return cand
+        return "self_attn"
+
+    def _detect_optional_layer_attr(self, candidates):
+        for layer in self._layers_module:
+            submods = dict(layer.named_children())
+            for cand in candidates:
+                if hasattr(layer, cand) or cand in submods:
+                    return cand
+        return None
+
+    def _refresh_model_tensor_name_cache(self):
+        self._model_tensor_names = set(dict(self.model.named_parameters()).keys())
+        self._model_tensor_names.update(dict(self.model.named_buffers()).keys())
+
+    def _resolve_existing_tensor_name(self, name: str) -> str:
+        """Best-effort resolve mapped name to an actual model tensor path."""
+        if name in self._model_tensor_names:
+            return name
+
+        # Common variant: with/without leading `model.` container.
+        if name.startswith("model."):
+            alt = name[len("model."):]
+            if alt in self._model_tensor_names:
+                return alt
+        else:
+            alt = "model." + name
+            if alt in self._model_tensor_names:
+                return alt
+
+        # Common variant: `layers.*` vs `model.layers.*` roots.
+        if name.startswith("layers."):
+            alt = "model." + name
+            if alt in self._model_tensor_names:
+                return alt
+        if name.startswith("model.layers."):
+            alt = name[len("model."):]
+            if alt in self._model_tensor_names:
+                return alt
+
+        return name
+
     # ------------------------------------------------------------------ #
     # Checkpoint → model name mapping                                    #
     # ------------------------------------------------------------------ #
@@ -190,11 +247,28 @@ class DeepseekV4Wrapper(Qwen3MoeWrapper):
         """
         name = ckpt_name.replace(".language_model", "")
 
-        # Prefix mappings (order matters: longest first to avoid partial match).
-        for ckpt_prefix, model_prefix in _CKPT_PREFIX_MAP:
-            if name.startswith(ckpt_prefix):
-                name = model_prefix + name[len(ckpt_prefix):]
-                break
+        # Prefix mappings (dynamic): choose root by runtime-detected layer prefix.
+        # e.g. ckpt `layers.0...` -> `model.layers.0...` or `layers.0...`.
+        if self.layer_prefix.endswith(".layers"):
+            root_prefix = self.layer_prefix[: -len(".layers")]
+        elif self.layer_prefix == "layers":
+            root_prefix = ""
+        else:
+            root_prefix = ""
+
+        def _join_root(suffix: str) -> str:
+            return f"{root_prefix}.{suffix}" if root_prefix else suffix
+
+        if name.startswith("layers."):
+            name = f"{self.layer_prefix}.{name[len('layers.') :]}"
+        elif name.startswith("embed."):
+            name = _join_root(f"embed.{name[len('embed.') :]}")
+        elif name.startswith("norm."):
+            name = _join_root(f"norm.{name[len('norm.') :]}")
+        elif name.startswith("hc_head"):
+            name = _join_root(f"hc_head{name[len('hc_head') :]}")
+        elif name.startswith("mtp."):
+            name = _join_root(f"mtp.{name[len('mtp.') :]}")
 
         # Suffix mappings.
         for ckpt_suffix, model_suffix in _CKPT_SUFFIX_MAP:
@@ -217,17 +291,27 @@ class DeepseekV4Wrapper(Qwen3MoeWrapper):
         name = re.sub(r"(?<=\.)w2(?=\.|$)", "down_proj", name)
 
         # Attention block alias across variants:
-        # some ckpt variants use `.attn.` while HF modules are usually `.self_attn.`.
-        # Use segment-level replacement to avoid touching names like `attn_hc`.
-        name = re.sub(r"(?<=\.)attn(?=\.|$)", "self_attn", name)
+        # use runtime-detected attn block attr, and only replace full segments.
+        if self._ATTN_BLOCK_ATTR == "self_attn":
+            name = re.sub(r"(?<=\.)attn(?=\.|$)", "self_attn", name)
+            name = re.sub(r"(?<=\.)attention(?=\.|$)", "self_attn", name)
+        elif self._ATTN_BLOCK_ATTR == "attn":
+            name = re.sub(r"(?<=\.)self_attn(?=\.|$)", "attn", name)
+            name = re.sub(r"(?<=\.)attention(?=\.|$)", "attn", name)
+        elif self._ATTN_BLOCK_ATTR == "attention":
+            name = re.sub(r"(?<=\.)self_attn(?=\.|$)", "attention", name)
+            name = re.sub(r"(?<=\.)attn(?=\.|$)", "attention", name)
 
         # Hyper-connection naming aliases across DeepSeek HF variants.
-        # ckpt may use `hc_attn_base` / `hc_ffn_base`, while some HF impls expose
-        # `attn_hc` / `ffn_hc`.
-        name = re.sub(r"(?<=\.)hc_attn_base(?=\.|$)", "attn_hc", name)
-        name = re.sub(r"(?<=\.)hc_ffn_base(?=\.|$)", "ffn_hc", name)
-        name = re.sub(r"(?<=\.)hc_mlp_base(?=\.|$)", "ffn_hc", name)
+        target_attn_hc = self._HC_ATTN_ATTR or "attn_hc"
+        target_ffn_hc = self._HC_FFN_ATTR or "ffn_hc"
+        for src in ("hc_attn_base", "attn_hc", "hc_attn"):
+            name = re.sub(rf"(?<=\.){re.escape(src)}(?=\.|$)", target_attn_hc, name)
+        for src in ("hc_ffn_base", "hc_mlp_base", "ffn_hc", "mlp_hc"):
+            name = re.sub(rf"(?<=\.){re.escape(src)}(?=\.|$)", target_ffn_hc, name)
 
+        # Final resolve: only keep names that exist in model tensors when possible.
+        name = self._resolve_existing_tensor_name(name)
         return name
 
     # ------------------------------------------------------------------ #
