@@ -56,14 +56,41 @@ class BaseModelWrapper(ABC):
                                 ) from None
 
         # HF only sets _attn_implementation on the top-level config; propagate to
-        # sub-configs so decoder layers pick up DeepseekV3FlashAttention2.
-        if hasattr(cfg, 'text_config') and cfg.text_config is not None:
-            cfg.text_config._attn_implementation = "sdpa"
-            with init_empty_weights():
-                empty_model = AutoModelForCausalLM.from_config(cfg.text_config, trust_remote_code=True).eval()
-        else:
-            with init_empty_weights():
-                empty_model = AutoModelForCausalLM.from_config(cfg, attn_implementation="sdpa", trust_remote_code=True).eval()
+        # sub-configs so decoder layers pick up the same attention backend.
+        # Some architectures (e.g. DeepSeek-V4 in certain HF versions) do not
+        # support SDPA and require eager mode; auto-fallback to eager on failure.
+        preferred_attn_impl = os.environ.get("GSQ_ATTN_IMPLEMENTATION", "sdpa")
+
+        def _build_empty_model(attn_impl: str):
+            if hasattr(cfg, 'text_config') and cfg.text_config is not None:
+                cfg.text_config._attn_implementation = attn_impl
+                return AutoModelForCausalLM.from_config(
+                    cfg.text_config,
+                    trust_remote_code=True,
+                    attn_implementation=attn_impl,
+                ).eval()
+            return AutoModelForCausalLM.from_config(
+                cfg,
+                trust_remote_code=True,
+                attn_implementation=attn_impl,
+            ).eval()
+
+        with init_empty_weights():
+            try:
+                empty_model = _build_empty_model(preferred_attn_impl)
+            except ValueError as e:
+                msg = str(e)
+                if preferred_attn_impl == "sdpa" and (
+                    "does not support an attention implementation" in msg
+                    or "scaled_dot_product_attention" in msg
+                ):
+                    print(
+                        "[BaseModelWrapper] WARNING: model/config does not support "
+                        "attn_implementation='sdpa'; fallback to 'eager'."
+                    )
+                    empty_model = _build_empty_model("eager")
+                else:
+                    raise
 
         self.model = empty_model
 
