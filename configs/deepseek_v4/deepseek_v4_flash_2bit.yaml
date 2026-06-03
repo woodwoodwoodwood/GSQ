@@ -46,9 +46,8 @@ quantization:
 training:
   num_epochs: 10
   device_microbatch_size: 4
-  masks_lr: 0.0002
-  signs_lr: 0.0001
-  scales_lr: 0.0001
+  lr1: 0.0002
+  lr2: 0.0001
   weight_decay: 1.0
   checkpoint_dir: "checkpoints/deepseek-v4-flash-2bit"
   log_dir: "logs/deepseek-v4-flash-2bit"
