@@ -236,15 +236,30 @@ class DeepseekV4Wrapper(Qwen3MoeWrapper):
         return name
 
     def _map_segment_if_exists(self, name: str, src: str, candidates):
-        """Replace dotted segment `src` by the first candidate yielding an existing tensor name."""
+        """Replace dotted segment `src` via weight-name probing.
+
+        For `.scale` / `.weight_scale` keys (which are not model params), we probe
+        the corresponding `.weight` name to keep weight/scale mapping consistent.
+        """
         if not re.search(rf"(?<=\.){re.escape(src)}(?=\.|$)", name):
             return name
 
+        def _to_weight_probe(n: str) -> str:
+            if n.endswith(".scale"):
+                return n[: -len(".scale")] + ".weight"
+            if n.endswith(".weight_scale"):
+                return n[: -len(".weight_scale")] + ".weight"
+            return n
+
         for cand in candidates:
             trial = re.sub(rf"(?<=\.){re.escape(src)}(?=\.|$)", cand, name)
-            resolved = self._resolve_existing_tensor_name(trial)
-            if resolved in self._model_tensor_names:
-                return resolved
+            probe = self._resolve_existing_tensor_name(_to_weight_probe(trial))
+            if probe in self._model_tensor_names:
+                # Keep scale-path text as-is for FP8 pairing keys, but normalize
+                # real parameter names when possible.
+                if trial.endswith(".scale") or trial.endswith(".weight_scale"):
+                    return trial
+                return self._resolve_existing_tensor_name(trial)
         return name
 
     # ------------------------------------------------------------------ #
@@ -328,18 +343,19 @@ class DeepseekV4Wrapper(Qwen3MoeWrapper):
         name = self._map_segment_if_exists(name, "wo_b", ["wo_b", "o_b_proj", "o_proj_b", "o_proj"])
 
         # Attention norm aliases.
-        name = self._map_segment_if_exists(name, "q_norm", ["q_norm", "q_a_layernorm", "q_layernorm"])
-        name = self._map_segment_if_exists(name, "kv_norm", ["kv_norm", "kv_a_layernorm", "k_layernorm"])
+        name = self._map_segment_if_exists(name, "q_norm", ["q_norm", "q_a_norm", "q_a_layernorm", "q_layernorm"])
+        name = self._map_segment_if_exists(name, "kv_norm", ["kv_norm", "kv_a_norm", "kv_a_layernorm", "k_layernorm"])
 
         # Hyper-connection naming aliases across DeepSeek HF variants.
-        # If runtime probing found no HC attr, keep original checkpoint names
-        # (do not force-convert to non-existing aliases).
-        target_attn_hc = self._HC_ATTN_ATTR or "hc_attn_base"
-        target_ffn_hc = self._HC_FFN_ATTR or "hc_ffn_base"
-        for src in ("hc_attn_base", "attn_hc", "hc_attn"):
-            name = re.sub(rf"(?<=\.){re.escape(src)}(?=\.|$)", target_attn_hc, name)
-        for src in ("hc_ffn_base", "hc_mlp_base", "ffn_hc", "mlp_hc"):
-            name = re.sub(rf"(?<=\.){re.escape(src)}(?=\.|$)", target_ffn_hc, name)
+        # Use existence-probed mapping instead of forced rename.
+        name = self._map_segment_if_exists(name, "hc_attn_base", ["hc_attn_base", "attn_hc", "hc_attn"])
+        name = self._map_segment_if_exists(name, "hc_ffn_base", ["hc_ffn_base", "ffn_hc", "hc_mlp_base", "mlp_hc"])
+
+        # Companion HC tensors (`*_fn`, `*_scale`) may vary similarly.
+        name = self._map_segment_if_exists(name, "hc_attn_fn", ["hc_attn_fn", "attn_hc_fn", "hc_attn_func"])
+        name = self._map_segment_if_exists(name, "hc_attn_scale", ["hc_attn_scale", "attn_hc_scale"])
+        name = self._map_segment_if_exists(name, "hc_ffn_fn", ["hc_ffn_fn", "ffn_hc_fn", "hc_mlp_fn", "mlp_hc_fn"])
+        name = self._map_segment_if_exists(name, "hc_ffn_scale", ["hc_ffn_scale", "ffn_hc_scale", "hc_mlp_scale", "mlp_hc_scale"])
 
         # Final resolve: only keep names that exist in model tensors when possible.
         name = self._resolve_existing_tensor_name(name)
