@@ -503,7 +503,7 @@ class BaseModelWrapper(ABC):
                 input_ids = kwargs.get("input_ids", None)
                 if torch.is_tensor(input_ids):
                     emb = self.model.get_input_embeddings()
-                    if emb is not None:
+                    if emb is not None and getattr(emb, "weight", None) is not None and not emb.weight.is_meta:
                         hidden_states = emb(input_ids.to(device=emb.weight.device, dtype=torch.long))
 
             if hidden_states is None:

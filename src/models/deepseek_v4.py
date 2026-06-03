@@ -194,6 +194,24 @@ class DeepseekV4Wrapper(Qwen3MoeWrapper):
     def get_layer_module(self, idx):
         return self._layers_module[idx]
 
+    def move_embed_to(self, device):
+        # DeepSeek-V4 ckpt key is `embed.weight` (mapped to `model.embed.embed_tokens.weight`).
+        names = self._names_from_ckpt(["embed"])
+        if device == "cuda":
+            self._set_tensors(names)
+        else:
+            self._offload_names_to_meta(names)
+
+    def move_output_heads_to(self, device):
+        # DeepSeek-V4 ckpt keys are `norm.*` and `head.weight`.
+        names = []
+        names += self._names_from_ckpt("norm")
+        names += self._names_from_ckpt("head")
+        if device == "cuda":
+            self._set_tensors(names)
+        else:
+            self._offload_names_to_meta(names)
+
     def _is_moe_layer(self, layer_idx):
         if layer_idx in self.mlp_only_layers:
             return False
