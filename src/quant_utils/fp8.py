@@ -93,12 +93,28 @@ def _expand_scale_to_weight(
         if s_out == out_f and s_in == in_f:
             # Already full-shape.
             return scale
+
         # 2-D block quantization: repeat each scale over its block.
-        block_r = out_f // s_out
-        block_c = in_f // s_in
-        return scale.unsqueeze(-1).unsqueeze(-1).expand(
-            s_out, block_r, s_in, block_c
-        ).reshape(out_f, in_f)
+        # Canonical layout: [out_blocks, in_blocks].
+        if out_f % s_out == 0 and in_f % s_in == 0:
+            block_r = out_f // s_out
+            block_c = in_f // s_in
+            return scale.unsqueeze(1).unsqueeze(-1).expand(
+                s_out, block_r, s_in, block_c
+            ).reshape(out_f, in_f)
+
+        # Some checkpoints may store transposed block grid: [in_blocks, out_blocks].
+        if out_f % s_in == 0 and in_f % s_out == 0:
+            scale_t = scale.transpose(0, 1).contiguous()
+            block_r = out_f // scale_t.shape[0]
+            block_c = in_f // scale_t.shape[1]
+            return scale_t.unsqueeze(1).unsqueeze(-1).expand(
+                scale_t.shape[0], block_r, scale_t.shape[1], block_c
+            ).reshape(out_f, in_f)
+
+        raise RuntimeError(
+            f"Unsupported FP8 scale shape {tuple(scale.shape)} for weight shape {tuple(weight_shape)}"
+        )
 
     # Fallback: try to broadcast.
     return scale
