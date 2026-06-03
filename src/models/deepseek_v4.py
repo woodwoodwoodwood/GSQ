@@ -264,32 +264,20 @@ class DeepseekV4Wrapper(Qwen3MoeWrapper):
         base = f"{self.layer_prefix}.{layer_idx}"
         moe_attr = self._MOE_BLOCK_ATTR
 
-        if not self._is_moe_layer(layer_idx):
-            non_mlp = [
-                f"{base}.input_layernorm",
-                f"{base}.self_attn",
-                f"{base}.post_attention_layernorm",
-            ]
-            mlp = [f"{base}.{moe_attr}"]
-            return {"non_mlp": non_mlp, "mlp": mlp}
+        # DeepSeek-V4不同HF版本在子模块命名上差异较大（如self_attn/hc_attn_*）。
+        # 采用“整层前缀”兜底加载，确保layernorm/attention/mlp权重都不会漏载。
+        non_mlp = [base]
 
-        non_mlp = [
-            f"{base}.input_layernorm",
-            f"{base}.self_attn",
-            f"{base}.{moe_attr}.gate",
-            f"{base}.{moe_attr}.shared_experts",
-            f"{base}.post_attention_layernorm",
-        ]
-        # ``...{moe}.experts.{e}`` covers ``.w{1,2,3}.weight`` and ``.scale``
-        # keys in the safetensors index.
-        mlp = [f"{base}.{moe_attr}.experts.{e}" for e in range(self.num_experts)]
+        if not self._is_moe_layer(layer_idx):
+            return {"non_mlp": non_mlp, "mlp": []}
+
         mlp_offload_params = [
             f"{base}.{moe_attr}.experts.gate_up_proj",
             f"{base}.{moe_attr}.experts.down_proj",
         ]
         return {
             "non_mlp": non_mlp,
-            "mlp": mlp,
+            "mlp": [],
             "mlp_offload_params": mlp_offload_params,
         }
 
