@@ -271,6 +271,39 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
             out_split_sizes = recv_sizes.tolist()
             in_split_sizes = in_sizes_tensor.tolist()
 
+            # Reuse route-debug logging in GSQ path as well.
+            route_debug = getattr(self, "_route_debug", None)
+            if route_debug is None:
+                route_debug = os.environ.get("GSQ_ROUTE_DEBUG", "0").strip().lower() in ("1", "true", "yes")
+                self._route_debug = route_debug
+            if not hasattr(self, "_route_debug_interval"):
+                try:
+                    self._route_debug_interval = max(1, int(os.environ.get("GSQ_ROUTE_DEBUG_INTERVAL", "20")))
+                except ValueError:
+                    self._route_debug_interval = 20
+            if not hasattr(self, "_route_debug_step"):
+                self._route_debug_step = 0
+
+            if route_debug:
+                self._route_debug_step += 1
+                if self._route_debug_step % self._route_debug_interval == 0:
+                    print(
+                        f"[ROUTE][rank={self.rank}][layer={self.current_layer_idx}][step={self._route_debug_step}] "
+                        f"send={in_split_sizes} recv={out_split_sizes}",
+                        flush=True,
+                    )
+                    if self.rank == 0:
+                        send_matrix = torch.stack(all_sizes)
+                        recv_totals = send_matrix.sum(dim=0)
+                        max_recv = int(recv_totals.max().item())
+                        min_recv = int(recv_totals.min().item())
+                        imbalance = float(max_recv) / float(max(1, min_recv))
+                        print(
+                            f"[ROUTE][global][layer={self.current_layer_idx}][step={self._route_debug_step}] "
+                            f"recv_totals={recv_totals.tolist()} imbalance(max/min)={imbalance:.2f}",
+                            flush=True,
+                        )
+
             xin = AllToAllTokens.apply(send_x_flat, out_split_sizes, in_split_sizes, pg)
             eids = AllToAllTokens.apply(send_eid_flat.unsqueeze(1), out_split_sizes, in_split_sizes, pg).squeeze(1)
 
