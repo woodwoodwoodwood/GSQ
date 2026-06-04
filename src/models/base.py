@@ -535,7 +535,20 @@ class BaseModelWrapper(ABC):
         for n in names:
             if n.endswith("inv_freq"):
                 continue
-            n = n.replace(".language_model", "")
+
+            # ``name_shard_pairs`` may carry checkpoint keys (e.g. ``layers.X``)
+            # while the HF model uses different internal paths (e.g.
+            # ``model.layers.X``). Reuse the same name mapper used during load.
+            n = self._ckpt_to_model_name(n).replace(".language_model", "")
+
+            # Some wrappers (e.g. DeepSeek-V4) provide an extra alias resolver
+            # for HF-version naming drift.
+            if hasattr(self, "_resolve_existing_tensor_name"):
+                try:
+                    n = self._resolve_existing_tensor_name(n)
+                except Exception:
+                    pass
+
             set_module_tensor_to_device(self.model, n, "meta")
         torch.cuda.empty_cache()
 
@@ -545,7 +558,12 @@ class BaseModelWrapper(ABC):
         self._offload_names_to_meta(non_pairs)
         if self.fused_experts and prefixes.get("mlp_offload_params"):
             for pname in prefixes["mlp_offload_params"]:
-                n = pname.replace(".language_model", "")
+                n = self._ckpt_to_model_name(pname).replace(".language_model", "")
+                if hasattr(self, "_resolve_existing_tensor_name"):
+                    try:
+                        n = self._resolve_existing_tensor_name(n)
+                    except Exception:
+                        pass
                 set_module_tensor_to_device(self.model, n, "meta")
         else:
             pairs = self._names_from_ckpt(prefixes["mlp"])
