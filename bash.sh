@@ -132,3 +132,51 @@ CUDA_VISIBLE_DEVICES=7 FLASHINFER_DISABLE_VERSION_CHECK=1 /usr/local/app/GSQ/.ve
   --tokenizer-mode hf \
   --max-num-seqs 32 \
   --generation-config vllm
+
+
+# nsys profile
+mkdir -p /usr/local/app/GSQ/outputs/nsys
+
+# profile humming 2bit
+CUDA_VISIBLE_DEVICES=7 FLASHINFER_DISABLE_VERSION_CHECK=1 \
+nsys profile \
+  --trace=cuda,nvtx,osrt \
+  --sample=none \
+  --force-overwrite=true \
+  --show-output=true \
+  --output=/usr/local/app/GSQ/outputs/nsys/humming_2bit \
+  /usr/local/app/GSQ/.venv/bin/vllm serve /data1/models/Qwen3-30B-A3B-Instruct-2507-gsq-2bit-humming \
+    --trust-remote-code \
+    --quantization humming \
+    --tensor-parallel-size 1 \
+    --host 127.0.0.1 \
+    --port 8900 \
+    --max-model-len 4096 \
+    --gpu-memory-utilization 0.85 \
+    --tokenizer-mode hf \
+    --max-num-seqs 32 \
+    --generation-config vllm
+
+# profile gptq_marlin 4bit
+mkdir -p /usr/local/app/GSQ/outputs/nsys
+
+CUDA_VISIBLE_DEVICES=7 nsys profile \
+  --trace=cuda,nvtx,osrt,cudnn,cublas \
+  --sample=none \
+  --force-overwrite=true \
+  --show-output=true \
+  --output=/usr/local/app/GSQ/outputs/nsys/marlin_4bit \
+  vllm serve /data1/models/Qwen3-30B-A3B-GPTQ-Int4 \
+    --trust-remote-code \
+    --quantization gptq_marlin \
+    --dtype float16 \
+    --host 127.0.0.1 \
+    --port 8900 \
+    --max-model-len 4096 \
+    --gpu-memory-utilization 0.90 \
+    --max-num-seqs 32 \
+    --generation-config vllm \
+    --disable-log-requests \
+    --disable-uvicorn-access-log
+
+
