@@ -535,13 +535,35 @@ def main():
     progress_reporter.init(config)
 
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     if world_size > 1 and not dist.is_initialized():
         dist.init_process_group(backend="nccl", timeout=timedelta(hours=config.distributed.timeout_hours))
-        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
         GLOBAL_RANK = dist.get_rank()
         device_count = torch.cuda.device_count()
         device_id = min(local_rank, device_count - 1) if device_count else 0
         torch.cuda.set_device(device_id)
+
+    # Startup diagnostics: make distributed/device state explicit to avoid ambiguity
+    if torch.cuda.is_available():
+        try:
+            current_dev = torch.cuda.current_device()
+        except Exception:
+            current_dev = -1
+    else:
+        current_dev = -1
+    print(
+        "[DIST] "
+        f"pid={os.getpid()} "
+        f"WORLD_SIZE(env)={os.environ.get('WORLD_SIZE', '1')} "
+        f"RANK(env)={os.environ.get('RANK', '0')} "
+        f"LOCAL_RANK(env)={os.environ.get('LOCAL_RANK', '0')} "
+        f"GLOBAL_RANK={GLOBAL_RANK} "
+        f"dist_initialized={dist.is_initialized()} "
+        f"cuda_visible_devices={os.environ.get('CUDA_VISIBLE_DEVICES', '<unset>')} "
+        f"cuda_device_count={torch.cuda.device_count()} "
+        f"current_device={current_dev}",
+        flush=True,
+    )
 
     config_dict = yaml.safe_load(open(args.config, 'r'))
 

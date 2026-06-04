@@ -180,3 +180,63 @@ CUDA_VISIBLE_DEVICES=7 nsys profile \
     --disable-uvicorn-access-log
 
 
+# gptq + gsq quantization training
+# single GPU
+cd /usr/local/app/GSQ
+
+CUDA_VISIBLE_DEVICES=7 \
+WORLD_SIZE=1 \
+RANK=0 \
+LOCAL_RANK=0 \
+/usr/local/app/GSQ/.venv/bin/python /usr/local/app/GSQ/main.py \
+  --config /usr/local/app/GSQ/configs/deepseek_v4/deepseek_v4_flash_2bit.yaml \
+  2>&1 | tee /usr/local/app/GSQ/outputs/train_single_$(date +%Y%m%d_%H%M%S).log
+
+# multi GPU
+GSQ_ROUTE_DEBUG=1 GSQ_ROUTE_DEBUG_INTERVAL=20 CUDA_VISIBLE_DEVICES=6,7 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True GSQ_PROFILE_DEQUANT=1 PYTHONUNBUFFERED=1 /usr/local/app/GSQ/.venv/bin/torchrun --nproc_per_node=2 --master_addr=127.0.0.1 --master_port=29517 /usr/local/app/GSQ/main.py --config /usr/local/app/GSQ/configs/deepseek_v4/deepseek_v4_flash_2bit.yaml
+
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+export NCCL_DEBUG=INFO
+export TORCH_DISTRIBUTED_DEBUG=DETAIL
+export NCCL_ASYNC_ERROR_HANDLING=1
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+export NCCL_BLOCKING_WAIT=1
+
+torchrun --standalone --nproc_per_node=4 /usr/local/app/GSQ/main.py \
+  --config /usr/local/app/GSQ/configs/deepseek_v4/deepseek_v4_flash_2bit.yaml \
+  2>&1 | tee /usr/local/app/GSQ/outputs/train_4gpu_$(date +%Y%m%d_%H%M%S).log
+
+GSQ_ROUTE_DEBUG=1 \
+GSQ_ROUTE_DEBUG_INTERVAL=20 \
+CUDA_VISIBLE_DEVICES=4,5,6,7 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+GSQ_PROFILE_DEQUANT=1 \
+PYTHONUNBUFFERED=1 \
+NCCL_DEBUG=INFO \
+TORCH_DISTRIBUTED_DEBUG=DETAIL \
+NCCL_ASYNC_ERROR_HANDLING=1 \
+TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
+NCCL_BLOCKING_WAIT=1 \
+/usr/local/app/GSQ/.venv/bin/torchrun \
+  --nproc_per_node=4 \
+  --master_addr=127.0.0.1 \
+  --master_port=29517 \
+  /usr/local/app/GSQ/main.py \
+  --config /usr/local/app/GSQ/configs/deepseek_v4/deepseek_v4_flash_2bit.yaml
+
+GSQ_ROUTE_DEBUG=0 \
+CUDA_VISIBLE_DEVICES=4,5,6,7 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+GSQ_PROFILE_DEQUANT=0 \
+PYTHONUNBUFFERED=1 \
+NCCL_DEBUG=WARN \
+TORCH_DISTRIBUTED_DEBUG=OFF \
+NCCL_ASYNC_ERROR_HANDLING=1 \
+TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
+NCCL_BLOCKING_WAIT=1 \
+/usr/local/app/GSQ/.venv/bin/torchrun \
+  --nproc_per_node=4 \
+  --master_addr=127.0.0.1 \
+  --master_port=29517 \
+  /usr/local/app/GSQ/main.py \
+  --config /usr/local/app/GSQ/configs/deepseek_v4/deepseek_v4_flash_2bit.yaml
