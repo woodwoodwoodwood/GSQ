@@ -221,7 +221,7 @@ class BaseModelWrapper(ABC):
         kind = "weight_scale" if raw_kind in ("weight_scale", "scale") else "weight"
         return layer_prefix, expert_idx, proj_kind, kind
 
-    def _try_dequant_mxfp4_pending(self, key):
+    def _try_dequant_mxfp4_pending(self, key, prof=None):
         """If both packed weight and scale tensors for ``key`` are buffered,
         dequantize and write the BF16 result into the fused expert slot.
         """
@@ -236,8 +236,20 @@ class BaseModelWrapper(ABC):
 
         from src.quant_utils import dequantize_mxfp4_to_dtype
 
+        t0 = None
+        if prof is not None:
+            if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+                torch.cuda.synchronize(self.device)
+            t0 = time.perf_counter()
+
         deq = dequantize_mxfp4_to_dtype(packed, scales, out_dtype=self.dtype)
         self._write_fused_expert_slice(layer_prefix, expert_idx, proj_kind, deq)
+
+        if prof is not None and t0 is not None:
+            if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+                torch.cuda.synchronize(self.device)
+            prof["mxfp4_s"] += (time.perf_counter() - t0)
+            prof["mxfp4_n"] += 1
 
         # Free intermediate tensors aggressively; expert weights are large.
         del self._mxfp4_pending[key]
@@ -383,6 +395,21 @@ class BaseModelWrapper(ABC):
         self._mxfp4_pending.clear()
         self._fp8_pending.clear()
 
+        profile_dequant = os.environ.get("GSQ_PROFILE_DEQUANT", "0").strip().lower() in ("1", "true", "yes")
+        if profile_dequant:
+            prof = {
+                "mxfp4_s": 0.0,
+                "mxfp4_n": 0,
+                "fp8_s": 0.0,
+                "fp8_n": 0,
+            }
+            if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+                torch.cuda.synchronize(self.device)
+            set_t0 = time.perf_counter()
+        else:
+            prof = None
+            set_t0 = None
+
         by_shard = {}
         for n, s in name_shard_pairs:
             by_shard.setdefault(s, []).append(n)
@@ -426,7 +453,7 @@ class BaseModelWrapper(ABC):
                             t = f.get_tensor(ckpt_name)
                             key = (layer_prefix, eid, proj)
                             self._mxfp4_pending.setdefault(key, {})[kind] = t
-                            self._try_dequant_mxfp4_pending(key)
+                            self._try_dequant_mxfp4_pending(key, prof=prof)
                             continue
 
                     # ----- FP8 dense online dequant path ----- #
@@ -442,7 +469,17 @@ class BaseModelWrapper(ABC):
                             entry["scale"] = f.get_tensor(ckpt_name)
                             if "weight" in entry:
                                 from src.quant_utils import dequantize_fp8_to_dtype
+                                fp8_t0 = None
+                                if prof is not None:
+                                    if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+                                        torch.cuda.synchronize(self.device)
+                                    fp8_t0 = time.perf_counter()
                                 deq = dequantize_fp8_to_dtype(entry["weight"], entry["scale"], out_dtype=self.dtype)
+                                if prof is not None and fp8_t0 is not None:
+                                    if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+                                        torch.cuda.synchronize(self.device)
+                                    prof["fp8_s"] += (time.perf_counter() - fp8_t0)
+                                    prof["fp8_n"] += 1
                                 ok = _safe_set_model_tensor(
                                     base_key + ".weight", deq, self.dtype,
                                 )
@@ -461,7 +498,17 @@ class BaseModelWrapper(ABC):
                                 entry["weight"] = t
                                 if "scale" in entry:
                                     from src.quant_utils import dequantize_fp8_to_dtype
+                                    fp8_t0 = None
+                                    if prof is not None:
+                                        if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+                                            torch.cuda.synchronize(self.device)
+                                        fp8_t0 = time.perf_counter()
                                     deq = dequantize_fp8_to_dtype(entry["weight"], entry["scale"], out_dtype=self.dtype)
+                                    if prof is not None and fp8_t0 is not None:
+                                        if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+                                            torch.cuda.synchronize(self.device)
+                                        prof["fp8_s"] += (time.perf_counter() - fp8_t0)
+                                        prof["fp8_n"] += 1
                                     ok = _safe_set_model_tensor(
                                         model_name, deq, self.dtype,
                                     )
@@ -524,6 +571,21 @@ class BaseModelWrapper(ABC):
                     f"loaded via direct upcast fallback."
                 )
             self._fp8_pending.clear()
+
+        if profile_dequant and set_t0 is not None:
+            if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+                torch.cuda.synchronize(self.device)
+            total_s = time.perf_counter() - set_t0
+            mxfp4_s = prof["mxfp4_s"]
+            fp8_s = prof["fp8_s"]
+            other_s = max(0.0, total_s - mxfp4_s - fp8_s)
+            print(
+                f"[PROFILE][rank={self.rank}][layer={self.current_layer_idx}] _set_tensors "
+                f"total={total_s:.3f}s | "
+                f"mxfp4={mxfp4_s:.3f}s ({prof['mxfp4_n']} calls, {mxfp4_s / max(total_s, 1e-9):.1%}) | "
+                f"fp8={fp8_s:.3f}s ({prof['fp8_n']} calls, {fp8_s / max(total_s, 1e-9):.1%}) | "
+                f"other={other_s:.3f}s ({other_s / max(total_s, 1e-9):.1%})"
+            )
 
     def move_layer_to_gpu(self, layer_name):
         prefixes = self._layer_prefixes(layer_name)
