@@ -51,8 +51,16 @@ class DeepseekV4DistributedWrapper(DeepseekV4Wrapper, Qwen3MoeDistributedWrapper
             )
         self.num_layers = len(self._layers_module)
 
-        # HF implementations may expose MoE block as `ffn` or `mlp`.
+        # HF implementations may expose MoE/attn/hc blocks with variant names.
         self._MOE_BLOCK_ATTR = self._detect_moe_block_attr()
+        self._ATTN_BLOCK_ATTR = self._detect_attn_block_attr()
+        self._HC_ATTN_ATTR = self._detect_optional_layer_attr(
+            ["attn_hc", "hc_attn_base", "hc_attn"]
+        )
+        self._HC_FFN_ATTR = self._detect_optional_layer_attr(
+            ["ffn_hc", "hc_ffn_base", "hc_mlp_base", "mlp_hc"]
+        )
+        self._refresh_model_tensor_name_cache()
 
         self.is_moe = True
         self.fused_experts = True

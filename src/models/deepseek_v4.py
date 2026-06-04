@@ -339,13 +339,14 @@ class DeepseekV4Wrapper(Qwen3MoeWrapper):
 
         # Attention block alias across variants:
         # use runtime-detected attn block attr, and only replace full segments.
-        if self._ATTN_BLOCK_ATTR == "self_attn":
+        attn_attr = getattr(self, "_ATTN_BLOCK_ATTR", "self_attn")
+        if attn_attr == "self_attn":
             name = re.sub(r"(?<=\.)attn(?=\.|$)", "self_attn", name)
             name = re.sub(r"(?<=\.)attention(?=\.|$)", "self_attn", name)
-        elif self._ATTN_BLOCK_ATTR == "attn":
+        elif attn_attr == "attn":
             name = re.sub(r"(?<=\.)self_attn(?=\.|$)", "attn", name)
             name = re.sub(r"(?<=\.)attention(?=\.|$)", "attn", name)
-        elif self._ATTN_BLOCK_ATTR == "attention":
+        elif attn_attr == "attention":
             name = re.sub(r"(?<=\.)self_attn(?=\.|$)", "attention", name)
             name = re.sub(r"(?<=\.)attn(?=\.|$)", "attention", name)
 
