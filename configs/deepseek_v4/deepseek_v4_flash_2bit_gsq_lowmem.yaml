@@ -43,7 +43,9 @@ training:
   ppl_eval_every_n_layers: 0
 
 gptq:
-  nsamples: 8
+  # Minimum practical value for current 2-GPU torchrun path.
+  # (n_hessian = nsamples // world_size must be >= 1)
+  nsamples: 2
   wbits: 2
   sym: true
   trits: false

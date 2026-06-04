@@ -564,7 +564,10 @@ class BaseModelWrapper(ABC):
                         n = self._resolve_existing_tensor_name(n)
                     except Exception:
                         pass
-                set_module_tensor_to_device(self.model, n, "meta")
+                try:
+                    set_module_tensor_to_device(self.model, n, "meta")
+                except (ValueError, AttributeError):
+                    continue
         else:
             pairs = self._names_from_ckpt(prefixes["mlp"])
             self._offload_names_to_meta(pairs)
