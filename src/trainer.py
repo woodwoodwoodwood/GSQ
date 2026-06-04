@@ -132,9 +132,10 @@ class QuantizationTrainer:
             epoch_losses = []
             epoch_start = time.time()
 
+            schedule_denom = max(1, num_training_steps - 1)
             for indices in self.get_random_batch_indices(num_samples, batch_size):
-                temperature = initial_temperature + (final_temperature - initial_temperature) * step / (num_training_steps - 1)
-                scale = initial_scale + (final_scale - initial_scale) * step / (num_training_steps - 1)
+                temperature = initial_temperature + (final_temperature - initial_temperature) * step / schedule_denom
+                scale = initial_scale + (final_scale - initial_scale) * step / schedule_denom
                 loss = self.train_step(
                     train_all['input'][indices],
                     temperature, 
