@@ -1,3 +1,4 @@
+import os
 import time
 import math
 import torch
@@ -26,6 +27,14 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
             [self.sharder.owner(e) for e in range(self.num_experts)],
             dtype=torch.long
         )
+
+        # Route debug (off by default)
+        self._route_debug = os.environ.get("GSQ_ROUTE_DEBUG", "0").strip().lower() in ("1", "true", "yes")
+        try:
+            self._route_debug_interval = max(1, int(os.environ.get("GSQ_ROUTE_DEBUG_INTERVAL", "20")))
+        except ValueError:
+            self._route_debug_interval = 20
+        self._route_debug_step = 0
 
     def _layer_prefixes(self, layer_name):
         layer_idx = int(layer_name.split('.')[-1])
@@ -158,6 +167,30 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
         recv_sizes = torch.stack(all_sizes)[:, self.rank]
         out_split_sizes = recv_sizes.tolist()
         in_split_sizes = in_sizes_tensor.tolist()
+
+        if self._route_debug:
+            self._route_debug_step += 1
+            if self._route_debug_step % self._route_debug_interval == 0:
+                # Per-rank local send/recv view
+                print(
+                    f"[ROUTE][rank={self.rank}][layer={self.current_layer_idx}][step={self._route_debug_step}] "
+                    f"send={in_split_sizes} recv={out_split_sizes}",
+                    flush=True,
+                )
+
+                # Rank-0 global imbalance summary
+                if self.rank == 0:
+                    # all_sizes: list of per-rank send vectors; stack -> [src_rank, dst_rank]
+                    send_matrix = torch.stack(all_sizes)
+                    recv_totals = send_matrix.sum(dim=0)  # total tokens each dst rank receives
+                    max_recv = int(recv_totals.max().item())
+                    min_recv = int(recv_totals.min().item())
+                    imbalance = float(max_recv) / float(max(1, min_recv))
+                    print(
+                        f"[ROUTE][global][layer={self.current_layer_idx}][step={self._route_debug_step}] "
+                        f"recv_totals={recv_totals.tolist()} imbalance(max/min)={imbalance:.2f}",
+                        flush=True,
+                    )
 
         xin = AllToAllTokens.apply(send_x_flat, out_split_sizes, in_split_sizes, pg)
         win = AllToAllTokens.apply(send_w_flat.unsqueeze(1), out_split_sizes, in_split_sizes, pg).to(self.dtype)
