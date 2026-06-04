@@ -24,10 +24,10 @@ model:
 
 data:
   dataset_name: "c4"
-  batch_size: 8
+  batch_size: 2
   num_samples: 128
   max_length: 2048
-  num_workers: 4
+  num_workers: 2
   val_samples: 32
 
 quantization:
@@ -45,7 +45,7 @@ quantization:
 
 training:
   num_epochs: 5
-  device_microbatch_size: 4
+  device_microbatch_size: 1
   lr1: 0.0002
   lr2: 0.0001
   weight_decay: 1.0
