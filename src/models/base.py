@@ -611,7 +611,12 @@ class BaseModelWrapper(ABC):
                 except Exception:
                     pass
 
-            set_module_tensor_to_device(self.model, n, "meta")
+            try:
+                set_module_tensor_to_device(self.model, n, "meta")
+            except (ValueError, AttributeError):
+                # Optional/version-specific tensors (e.g. attention buffers like
+                # ``attn_sink``) may not exist in this HF implementation.
+                continue
         torch.cuda.empty_cache()
 
     def offload_to_meta(self, layer_name):
