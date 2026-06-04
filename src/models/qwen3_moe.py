@@ -138,14 +138,42 @@ class Qwen3MoeWrapper(BaseModelWrapper):
         unsort_idx = torch.argsort(sort_idx)
         return out_buf.index_select(0, unsort_idx)
 
+    def _router_topk(self, router, flat_hidden):
+        import inspect
+
+        sig_params = list(inspect.signature(router.forward).parameters.keys())
+        if "input_ids" in sig_params:
+            dummy_input_ids = torch.arange(
+                flat_hidden.shape[0],
+                device=flat_hidden.device,
+                dtype=torch.long,
+            )
+            router_out = router(flat_hidden, dummy_input_ids)
+        else:
+            router_out = router(flat_hidden)
+
+        if isinstance(router_out, tuple) and len(router_out) == 3:
+            _, topw, topi = router_out
+        elif isinstance(router_out, tuple) and len(router_out) == 2:
+            topw, topi = router_out
+        else:
+            raise RuntimeError(
+                f"Unexpected router output of len={len(router_out) if isinstance(router_out, tuple) else 'NA'} "
+                f"for {type(router).__name__}"
+            )
+
+        top_k = getattr(router, "top_k", None) or getattr(router, "num_experts_per_tok", None)
+        if top_k is None:
+            top_k = topi.shape[-1]
+        return topw, topi, top_k
+
     def _route_tokens_flat(self, mlp_input_batch):
         layer = self.get_layer_module(self.current_layer_idx)
         B, T, H = mlp_input_batch.shape
         hidden = layer.post_attention_layernorm(mlp_input_batch)
         x_flat = hidden.reshape(B * T, H)
         router = layer.mlp.gate
-        _, topw, topi = router(hidden.reshape(-1, H))
-        top_k = router.top_k
+        topw, topi, top_k = self._router_topk(router, hidden.reshape(-1, H))
         tok_idx_flat = torch.arange(B * T, device=self.device, dtype=torch.long).repeat_interleave(top_k)
         eid_flat = topi.reshape(-1).to(torch.long)
         w_flat = topw.reshape(-1).to(self.dtype)
