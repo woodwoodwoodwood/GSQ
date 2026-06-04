@@ -1,0 +1,60 @@
+# DeepSeek-V4-Flash GSQ 2-bit low-memory config (single-GPU bring-up)
+#
+# Goal:
+# - Keep GSQ enabled (unlike GPTQ-only smoke), but reduce peak memory in backward.
+# - Isolate outputs from production runs.
+
+model:
+  name: "/data1/models/DeepSeek-V4-Flash"
+  device: "cuda"
+  dtype: "bfloat16"
+
+data:
+  dataset_name: "c4"
+  batch_size: 1
+  num_samples: 8
+  max_length: 512
+  num_workers: 2
+  val_samples: 4
+
+quantization:
+  gsq_bits: 2
+  init_method: "gptq"
+  gsq_enabled: true
+  start_layer: 0
+  self_attn: false
+  std: 0.01
+  temperature: [2, 0.05]
+  scale: [100, 500]
+  groupsize: 256
+  strength: 4
+  logits_dtype: "bfloat16"
+
+training:
+  num_epochs: 1
+  device_microbatch_size: 1
+  lr1: 0.0002
+  lr2: 0.0001
+  weight_decay: 1.0
+  checkpoint_dir: "checkpoints/deepseek-v4-flash-2bit-gsq-lowmem"
+  log_dir: "logs/deepseek-v4-flash-2bit-gsq-lowmem"
+  act_cache_dir: "cache/act_cache_gsq_lowmem"
+  eval_baseline: false
+  ppl_eval_every_n_layers: 0
+
+gptq:
+  nsamples: 8
+  wbits: 2
+  sym: true
+  trits: false
+  percdamp: 0.1
+  blocksize: 128
+  groupsize: 256
+  static_groups: false
+  prunen: 0
+  prunem: 0
+
+wandb:
+  enabled: false
+  entity: "ist"
+  project: "GSQ-multi"
