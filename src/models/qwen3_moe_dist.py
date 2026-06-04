@@ -168,7 +168,21 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
         out_split_sizes = recv_sizes.tolist()
         in_split_sizes = in_sizes_tensor.tolist()
 
-        if self._route_debug:
+        # DeepseekV4DistributedWrapper does not call Qwen3MoeDistributedWrapper.__init__,
+        # so these debug attrs may be absent; lazily initialize for compatibility.
+        route_debug = getattr(self, "_route_debug", None)
+        if route_debug is None:
+            route_debug = os.environ.get("GSQ_ROUTE_DEBUG", "0").strip().lower() in ("1", "true", "yes")
+            self._route_debug = route_debug
+        if not hasattr(self, "_route_debug_interval"):
+            try:
+                self._route_debug_interval = max(1, int(os.environ.get("GSQ_ROUTE_DEBUG_INTERVAL", "20")))
+            except ValueError:
+                self._route_debug_interval = 20
+        if not hasattr(self, "_route_debug_step"):
+            self._route_debug_step = 0
+
+        if route_debug:
             self._route_debug_step += 1
             if self._route_debug_step % self._route_debug_interval == 0:
                 # Per-rank local send/recv view
