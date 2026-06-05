@@ -56,15 +56,36 @@ def prepare_test_dataloader(
 
     class TestDataset(Dataset):
         def __init__(self, ds, tokenizer, seqlen=2048):
-            """Tokenize the entire dataset and reshape it into sequences of length seqlen."""
-            tokenized_ds = tokenizer("\n\n".join(ds['text']), return_tensors='pt')
-            nsamples = tokenized_ds.input_ids.numel() // seqlen
-            # nsamples = 128
+            """Tokenize dataset incrementally and pack into fixed-length blocks.
 
-            input_ids = tokenized_ds.input_ids[0, : nsamples * seqlen]
-            input_ids = input_ids.reshape(nsamples, seqlen)
-            attn_mask = tokenized_ds.attention_mask[0, : nsamples * seqlen]
-            attn_mask = attn_mask.reshape(nsamples, seqlen)
+            NOTE:
+            Avoid a single tokenizer call on a giant concatenated string; that can
+            trigger very long sequence warnings and unstable CUDA behavior later.
+            """
+            sep_ids = tokenizer("\n\n", add_special_tokens=False, return_attention_mask=False)["input_ids"]
+            eos_id = tokenizer.eos_token_id
+
+            packed_ids = []
+            for text in ds["text"]:
+                ids = tokenizer(text, add_special_tokens=False, return_attention_mask=False)["input_ids"]
+                # HF tokenizer may return nested list for batched-like inputs.
+                if len(ids) > 0 and isinstance(ids[0], list):
+                    ids = ids[0]
+                if not ids:
+                    continue
+                packed_ids.extend(ids)
+                if eos_id is not None:
+                    packed_ids.append(eos_id)
+                elif sep_ids:
+                    packed_ids.extend(sep_ids)
+
+            nsamples = len(packed_ids) // seqlen
+            if nsamples <= 0:
+                raise ValueError("PPL eval dataset has too few tokens to form one sequence.")
+
+            total = nsamples * seqlen
+            input_ids = torch.tensor(packed_ids[:total], dtype=torch.long).reshape(nsamples, seqlen)
+            attn_mask = torch.ones_like(input_ids)
 
             self.input_ids = input_ids
             self.attn_mask = attn_mask
