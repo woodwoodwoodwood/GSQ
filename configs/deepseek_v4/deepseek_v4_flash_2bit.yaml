@@ -68,6 +68,6 @@ gptq:
   prunem: 0
 
 wandb:
-  enabled: true
+  enabled: false
   entity: "ist"
   project: "GSQ-multi"
