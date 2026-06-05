@@ -25,8 +25,8 @@ model:
 data:
   dataset_name: "c4"
   batch_size: 64
-  num_samples: 4096
-  max_length: 4096
+  num_samples: 1024
+  max_length: 1024
   num_workers: 8
   val_samples: 128
 
@@ -68,6 +68,6 @@ gptq:
   prunem: 0
 
 wandb:
-  enabled: true
+  enabled: false
   entity: "ist"
   project: "GSQ-multi"
