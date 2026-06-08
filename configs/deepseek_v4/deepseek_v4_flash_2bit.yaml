@@ -44,7 +44,7 @@ quantization:
   logits_dtype: "bfloat16"
 
 training:
-  num_epochs: 5
+  num_epochs: 2
   device_microbatch_size: 4
   lr1: 0.0002
   lr2: 0.0001

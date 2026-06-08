@@ -397,6 +397,96 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
 
+        # ----- Per-expert routing diagnostic ---------------------------------
+        # During calib, each rank's owned experts accumulate their Hessian via
+        # tokens that get routed to them (top-k routing + A2A dispatch). When
+        # routing skews (typically at deeper layers, especially when the
+        # accumulated quantization error from earlier layers shifts the
+        # router-input distribution), some experts may receive 0 or very few
+        # tokens, forcing GPTQ.cholesky() into the identity-Hessian fallback
+        # (effectively per-channel RTN with damping for that expert).
+        #
+        # We emit a single concise summary per layer on rank 0 so this is
+        # easy to spot in the training log, and avoid one warning per dead
+        # linear (which fires 3× per dead expert: gate/up/down).
+        local_zero = 0       # experts with 0 calib tokens on this rank
+        local_underfed = 0   # experts with 0 < nsamples < UNDERFED_THRESHOLD
+        local_owned = 0
+        local_min_pos = float("inf")  # min nsamples among non-zero owned
+        local_max = 0
+        local_sum = 0
+        UNDERFED_THRESHOLD = max(16, config.gptq.groupsize // 4)
+        for nm in gpts:
+            if "gate_proj" not in nm:
+                # Each expert has gate/up/down sharing the same token count;
+                # count once per expert via gate_proj only.
+                continue
+            local_owned += 1
+            nsamp = gpts[nm].nsamples
+            local_sum += nsamp
+            if nsamp == 0:
+                local_zero += 1
+            else:
+                if nsamp < UNDERFED_THRESHOLD:
+                    local_underfed += 1
+                if nsamp < local_min_pos:
+                    local_min_pos = nsamp
+                if nsamp > local_max:
+                    local_max = nsamp
+        if local_min_pos == float("inf"):
+            local_min_pos = 0
+
+        if dist.is_initialized():
+            stats = torch.tensor(
+                [local_owned, local_zero, local_underfed, local_sum, local_max],
+                device=self.device, dtype=torch.long,
+            )
+            min_pos_t = torch.tensor([int(local_min_pos)], device=self.device, dtype=torch.long)
+            dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+            # MIN reduce of "min among nonzero" - replace 0 with INT64_MAX so
+            # ranks with all-dead experts don't drag the min to 0.
+            sentinel = torch.iinfo(torch.long).max
+            min_pos_for_reduce = min_pos_t if min_pos_t.item() > 0 else torch.tensor(
+                [sentinel], device=self.device, dtype=torch.long
+            )
+            dist.all_reduce(min_pos_for_reduce, op=dist.ReduceOp.MIN)
+            max_t = torch.tensor([local_max], device=self.device, dtype=torch.long)
+            dist.all_reduce(max_t, op=dist.ReduceOp.MAX)
+
+            g_owned, g_zero, g_under, g_sum, _ = stats.tolist()
+            g_min_pos = min_pos_for_reduce.item()
+            if g_min_pos == sentinel:
+                g_min_pos = 0
+            g_max = max_t.item()
+        else:
+            g_owned, g_zero, g_under, g_sum = local_owned, local_zero, local_underfed, local_sum
+            g_min_pos, g_max = int(local_min_pos), local_max
+
+        if self.rank == 0:
+            g_mean = (g_sum / g_owned) if g_owned > 0 else 0.0
+            severity = "OK"
+            if g_zero > 0:
+                severity = "DEAD"
+            elif g_under > 0:
+                severity = "UNDERFED"
+            print(
+                f"[GPTQ-CALIB][layer={layer_idx}] expert tokens "
+                f"min/mean/max={g_min_pos}/{int(g_mean)}/{g_max} "
+                f"experts(total={g_owned}, dead0={g_zero}, "
+                f"under{UNDERFED_THRESHOLD}={g_under}) [{severity}]",
+                flush=True,
+            )
+            if g_zero > 0:
+                print(
+                    f"[GPTQ-CALIB][layer={layer_idx}] WARNING: {g_zero} expert(s) "
+                    f"received 0 calib tokens; identity-Hessian fallback ⇒ effectively RTN "
+                    f"for these experts. To reduce: increase config.gptq.nsamples "
+                    f"(currently {config.gptq.nsamples}), increase data.max_length, "
+                    f"or use a calibration set whose token distribution exercises more experts.",
+                    flush=True,
+                )
+        # ---------------------------------------------------------------------
+
         gptq_losses = []
         for name in gpts:
             if "up_proj" in name:
