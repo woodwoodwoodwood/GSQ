@@ -134,3 +134,48 @@ class DeepseekV4DistributedWrapper(DeepseekV4Wrapper, Qwen3MoeDistributedWrapper
             "mlp": local_expert,
             "mlp_offload_params": mlp_offload_params,
         }
+
+    # ------------------------------------------------------------------ #
+    # PPL evaluation                                                     #
+    # ------------------------------------------------------------------ #
+    @torch.no_grad()
+    def ppl_evaluation(self, read_from_disk=-1):
+        """DeepSeek-V4-Flash is structurally incompatible with the Qwen-MoE
+        layer-by-layer PPL path:
+
+        * Layer residuals are mHC (Manifold-Constrained Hyper-Connections, 4D
+          ``[B, S, hc_mult, D]`` state with Sinkhorn-projected mixing matrices),
+          not the standard Pre-LN ``x + attn(LN(x))`` / ``x + mlp(LN(x))`` that
+          ``Qwen3MoeDistributedWrapper.ppl_evaluation`` assumes.
+        * ``DeepseekV4Attention.forward`` requires ``position_embeddings`` (a
+          ``{"main", "compress"}`` rotary dict) and ``s_aux=self.sinks`` —
+          neither is plumbed by the layer-by-layer path.
+        * The MoE block is a HashRouter that needs ``input_ids``.
+        * Two attention sub-paths use compressors (HCA / CSA) with their own
+          rolling-window state.
+
+        Calling the inherited PPL would (and does) trigger asynchronous
+        ``cudaErrorIllegalAddress`` from MLA + zero-initialised ``sinks`` /
+        missing position embeddings. We disable it here and log clear guidance.
+
+        Health monitoring during quantization should use:
+          * ``gptq/avg_loss`` (per-layer, in W&B)
+          * ``{layer}/val_hard_loss`` (per-epoch, in W&B; the Gumbel-softmax
+            validation MSE is the same target the quantizer optimizes)
+
+        End-to-end perplexity / lm-eval should be run post-training via
+        ``eval_model.py`` against a vLLM server with the assembled checkpoint.
+        """
+        msg = (
+            "[DeepseekV4DistributedWrapper] ppl_evaluation is disabled: the "
+            "layer-by-layer PPL path is incompatible with mHC residuals, MLA "
+            "position_embeddings, and HashRouter input_ids in DeepSeek-V4-Flash. "
+            "Use post-training vLLM + eval_model.py for true PPL/benchmarks; "
+            "monitor per-layer health via gptq/avg_loss and {layer}/val_hard_loss "
+            "in W&B."
+        )
+        if self.rank == 0 and not getattr(self, "_ppl_disabled_logged", False):
+            print(msg, flush=True)
+            self._ppl_disabled_logged = True
+
+        return float("nan")

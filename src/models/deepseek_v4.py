@@ -367,6 +367,12 @@ class DeepseekV4Wrapper(Qwen3MoeWrapper):
         name = self._map_segment_if_exists(name, "q_norm", ["q_norm", "q_a_norm", "q_a_layernorm", "q_layernorm"])
         name = self._map_segment_if_exists(name, "kv_norm", ["kv_norm", "kv_a_norm", "kv_a_layernorm", "k_layernorm"])
 
+        # Attention sink alias: ckpt uses ``attn_sink`` but newer HF
+        # ``DeepseekV4Attention`` exposes the Parameter as ``sinks`` (used as
+        # ``s_aux=self.sinks`` in the SDPA call). Older variants kept the
+        # ``attn_sink`` name; probe both.
+        name = self._map_segment_if_exists(name, "attn_sink", ["sinks", "attn_sink"])
+
         # Hyper-connection naming aliases across DeepSeek HF variants.
         # Use existence-probed mapping instead of forced rename.
         name = self._map_segment_if_exists(name, "hc_attn_base", ["hc_attn_base", "attn_hc", "hc_attn"])

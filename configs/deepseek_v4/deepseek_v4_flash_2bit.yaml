@@ -52,8 +52,13 @@ training:
   checkpoint_dir: "checkpoints/deepseek-v4-flash-2bit"
   log_dir: "logs/deepseek-v4-flash-2bit"
   act_cache_dir: "cache/act_cache"
+  # ppl_evaluation is disabled in DeepseekV4DistributedWrapper because the
+  # layer-by-layer PPL path is structurally incompatible with mHC residuals
+  # / MLA position_embeddings / HashRouter input_ids. Per-layer health should
+  # be monitored via gptq/avg_loss and {layer}/val_hard_loss in W&B; full PPL
+  # / benchmarks should be run post-training via eval_model.py against vLLM.
   eval_baseline: false
-  ppl_eval_every_n_layers: 1
+  ppl_eval_every_n_layers: 0
 
 gptq:
   nsamples: 512
