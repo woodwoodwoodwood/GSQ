@@ -150,17 +150,34 @@ class Qwen3MoeWrapper(BaseModelWrapper):
         unsort_idx = torch.argsort(sort_idx)
         return out_buf.index_select(0, unsort_idx)
 
-    def _router_topk(self, router, flat_hidden):
+    def _router_topk(self, router, flat_hidden, input_ids=None):
         import inspect
 
         sig_params = list(inspect.signature(router.forward).parameters.keys())
         if "input_ids" in sig_params:
-            dummy_input_ids = torch.arange(
-                flat_hidden.shape[0],
-                device=flat_hidden.device,
-                dtype=torch.long,
-            )
-            router_out = router(flat_hidden, dummy_input_ids)
+            if input_ids is None:
+                # Last-resort fallback: ``arange`` only exercises a handful of
+                # vocab ids -> hash routers (e.g. DeepSeek-V4-Flash) collapse all
+                # tokens onto the same ~64 experts. Callers should plumb through
+                # the real input_ids whenever possible.
+                router_input_ids = torch.arange(
+                    flat_hidden.shape[0],
+                    device=flat_hidden.device,
+                    dtype=torch.long,
+                )
+            else:
+                # Flatten to (B*T,) and clamp to vocab size in case the router
+                # holds a ``tid2eid[vocab_size]`` lookup buffer.
+                router_input_ids = input_ids.reshape(-1).to(
+                    device=flat_hidden.device, dtype=torch.long
+                )
+                if router_input_ids.shape[0] != flat_hidden.shape[0]:
+                    raise RuntimeError(
+                        f"Router input_ids length {router_input_ids.shape[0]} does not "
+                        f"match flat_hidden token count {flat_hidden.shape[0]}; "
+                        f"check that calibration batches use the same seq_len."
+                    )
+            router_out = router(flat_hidden, router_input_ids)
         else:
             router_out = router(flat_hidden)
 

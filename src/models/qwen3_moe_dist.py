@@ -74,6 +74,7 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
         current_layer = self.get_layer_module(self.current_layer_idx)
         num_samples = data_all['input'].shape[0]
         num_batches = (num_samples + self.batch_size - 1) // self.batch_size
+        ids_buf = data_all.get('input_ids', None) if isinstance(data_all, dict) else None
         for batch_idx in range(num_batches):
             start_idx = batch_idx * self.batch_size
             end_idx = min((batch_idx + 1) * self.batch_size, num_samples)
@@ -92,12 +93,18 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
                     hidden_states = hidden_states[0]
                 out = hidden_states + mlp_input
             else:
-                out = self.run_expert_parallel(mlp_input)
+                # Pass real input_ids so hash-routed MoE (DeepSeek-V4-Flash)
+                # uses ``tid2eid[input_ids]`` instead of arange dummies.
+                if ids_buf is not None:
+                    batch_ids = ids_buf[start_idx:end_idx].to(self.device, non_blocking=True)
+                else:
+                    batch_ids = None
+                out = self.run_expert_parallel(mlp_input, input_ids=batch_ids)
 
             data_all['input'][start_idx:end_idx] = out.detach().cpu()
 
     @torch.no_grad()
-    def get_mlp_output(self, mlp_input_batch):
+    def get_mlp_output(self, mlp_input_batch, input_ids=None):
         if not self._is_moe_layer(self.current_layer_idx):
             current_layer = self.get_layer_module(self.current_layer_idx)
             hidden_states = current_layer.post_attention_layernorm(mlp_input_batch)
@@ -105,7 +112,7 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
             if isinstance(hidden_states, tuple):
                 hidden_states = hidden_states[0]
             return hidden_states + mlp_input_batch
-        return self.run_expert_parallel(mlp_input_batch)
+        return self.run_expert_parallel(mlp_input_batch, input_ids=input_ids)
 
     def _router_topk(self, router, flat_hidden):
         import inspect
@@ -136,8 +143,15 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
             top_k = topi.shape[-1]
         return topw, topi, top_k
 
-    def _dispatch_tokens(self, mlp_input_batch):
-        """Route tokens to expert-owning ranks via all-to-all."""
+    def _dispatch_tokens(self, mlp_input_batch, input_ids=None):
+        """Route tokens to expert-owning ranks via all-to-all.
+
+        ``input_ids`` (optional): real (B, T) vocab token ids; required by hash
+        routers (DeepSeek-V4-Flash) that look up ``tid2eid[input_ids]`` for
+        expert selection. Falls back to ``arange`` dummies when None — that
+        fallback collapses every batch onto the same ~64 experts and starves
+        the rest of GPTQ calibration data.
+        """
         layer = self.get_layer_module(self.current_layer_idx)
         device = self.device
         pg = dist.group.WORLD
@@ -147,7 +161,7 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
         x_flat = hidden.reshape(B * T, H)
 
         router = self._moe_block(layer).gate
-        topw, topi, top_k = self._router_topk(router, hidden.reshape(-1, H))
+        topw, topi, top_k = self._router_topk(router, hidden.reshape(-1, H), input_ids=input_ids)
 
         tok_idx_flat = torch.arange(B * T, device=device, dtype=torch.long).repeat_interleave(top_k)
         eid_flat = topi.reshape(-1).to(torch.long)
@@ -218,11 +232,11 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
         return self._fused_expert_forward_batched(
             xin, eids, quantized_weights=quantized_weights, gpts_calib=gpts_calib)
 
-    def run_expert_parallel(self, mlp_input_batch, quantized_weights=None, gpts_calib=None):
+    def run_expert_parallel(self, mlp_input_batch, quantized_weights=None, gpts_calib=None, input_ids=None):
         pg = dist.group.WORLD
 
         x_flat, hidden, send_idx_flat, in_split_sizes, out_split_sizes, xin, win, eids, B, T, H = \
-            self._dispatch_tokens(mlp_input_batch)
+            self._dispatch_tokens(mlp_input_batch, input_ids=input_ids)
 
         out_local = self._batched_expert_forward(xin, eids, quantized_weights, gpts_calib=gpts_calib)
         xin = out_local * win
@@ -243,7 +257,7 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
 
         return y + mlp_input_batch
 
-    def calculate_mse(self, mlp_input_batch, quantized_weights, self_attn=False, validation=False, accumulation_steps=1):
+    def calculate_mse(self, mlp_input_batch, quantized_weights, self_attn=False, validation=False, accumulation_steps=1, input_ids=None):
         if not self._is_moe_layer(self.current_layer_idx):
             return super(Qwen3MoeWrapper, self).calculate_mse(
                 mlp_input_batch, quantized_weights,
@@ -260,7 +274,7 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
             x_flat = hidden.reshape(B * T, H)
 
             router = self._moe_block(layer).gate
-            _, topi, top_k = self._router_topk(router, hidden.reshape(-1, H))
+            _, topi, top_k = self._router_topk(router, hidden.reshape(-1, H), input_ids=input_ids)
 
             tok_idx_flat = torch.arange(B * T, device=device, dtype=torch.long).repeat_interleave(top_k)
             eid_flat = topi.reshape(-1).to(torch.long)
@@ -378,6 +392,7 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
         n_hessian = config.gptq.nsamples // self.world_size
         calib_start = time.time()
         calib_report_interval = max(1, n_hessian // self.calib_report_divisor)
+        ids_buf = gpt_all.get('input_ids', None) if isinstance(gpt_all, dict) else None
         with torch.no_grad():
             for j in range(n_hessian):
                 x = gpt_all['input'][j].unsqueeze(0).to(self.device, non_blocking=True)
@@ -390,7 +405,20 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
                 attn_out, _ = layer.self_attn(hidden_states, **additional_layer_inputs)
                 x = x + attn_out
 
-                _ = self.run_expert_parallel(x, quantized_weights=None, gpts_calib=gpts)
+                # Real input_ids for hash-routed MoE (DeepSeek-V4-Flash). Falls
+                # back to ``arange`` dummies when the dataset pipeline did not
+                # populate ``input_ids`` (older runs / non-hash routers).
+                if ids_buf is not None:
+                    batch_input_ids = ids_buf[j].unsqueeze(0).to(self.device, non_blocking=True)
+                else:
+                    batch_input_ids = None
+
+                _ = self.run_expert_parallel(
+                    x,
+                    quantized_weights=None,
+                    gpts_calib=gpts,
+                    input_ids=batch_input_ids,
+                )
                 if rank == 0 and (j + 1) % calib_report_interval == 0:
                     report_gptq_calib(j + 1, n_hessian, time.time() - calib_start)
 

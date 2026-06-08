@@ -643,6 +643,7 @@ class BaseModelWrapper(ABC):
     def get_inputs(self, data_dict, data_loader):
         current_layer = self.get_layer_module(self.current_layer_idx)
         cache = {'index': 0}
+        ids_buf = data_dict.get('input_ids', None)
         def store_input_hook(_, args, kwargs):
             start = cache['index'] * self.batch_size
             end = min(start + self.batch_size, data_dict['input'].shape[0])
@@ -658,12 +659,20 @@ class BaseModelWrapper(ABC):
                         hidden_states = a
                         break
 
+            input_ids_arg = kwargs.get("input_ids", None)
+            if not torch.is_tensor(input_ids_arg):
+                # main.py calls self.model(batch.to(self.device)) with a positional
+                # tensor argument -- HF resolves it as input_ids. Recover that.
+                for a in args:
+                    if torch.is_tensor(a) and a.dim() == 2 and a.dtype in (torch.long, torch.int64, torch.int32):
+                        input_ids_arg = a
+                        break
+
             if hidden_states is None:
-                input_ids = kwargs.get("input_ids", None)
-                if torch.is_tensor(input_ids):
+                if torch.is_tensor(input_ids_arg):
                     emb = self.model.get_input_embeddings()
                     if emb is not None and getattr(emb, "weight", None) is not None and not emb.weight.is_meta:
-                        hidden_states = emb(input_ids.to(device=emb.weight.device, dtype=torch.long))
+                        hidden_states = emb(input_ids_arg.to(device=emb.weight.device, dtype=torch.long))
 
             if hidden_states is None:
                 got_shapes = [tuple(a.shape) for a in args if torch.is_tensor(a)]
@@ -675,6 +684,23 @@ class BaseModelWrapper(ABC):
 
             batch_n = min(hidden_states.shape[0], end - start)
             data_dict['input'][start:start + batch_n] = hidden_states[:batch_n].to(data_dict['input'].dtype).cpu()
+
+            # Persist real input_ids per sample (needed by hash-routed MoE so the
+            # MoE dispatcher can do tid2eid[input_ids] instead of arange dummies).
+            if ids_buf is not None and torch.is_tensor(input_ids_arg):
+                ids_cpu = input_ids_arg[:batch_n].to(torch.long).cpu()
+                # Pad / truncate to ids_buf seqlen if upstream batch shape differs.
+                target_seq = ids_buf.shape[1]
+                if ids_cpu.shape[1] >= target_seq:
+                    ids_cpu = ids_cpu[:, :target_seq]
+                else:
+                    pad = torch.zeros(
+                        (ids_cpu.shape[0], target_seq - ids_cpu.shape[1]),
+                        dtype=ids_cpu.dtype,
+                    )
+                    ids_cpu = torch.cat([ids_cpu, pad], dim=1)
+                ids_buf[start:start + batch_n] = ids_cpu
+
             cache['index'] += 1
 
             for k, v in kwargs.items():
@@ -731,14 +757,25 @@ class BaseModelWrapper(ABC):
         for batch_idx in range(num_batches):
             start_idx, end_idx = batch_idx * self.batch_size, min((batch_idx + 1) * self.batch_size, num_samples)
             data_all['input'][start_idx:end_idx] = self.get_mlp_input(data_all['input'][start_idx:end_idx].to(self.device)).detach().cpu()
-    
+
     @torch.no_grad()
     def get_mlp_output_all(self, data_all):
         num_samples = data_all['input'].shape[0]
         num_batches = (num_samples + self.batch_size - 1) // self.batch_size
+        ids_buf = data_all.get('input_ids', None) if isinstance(data_all, dict) else None
+        # ``get_mlp_output`` may or may not accept ``input_ids`` depending on
+        # subclass; passing it via inspect avoids breaking older signatures.
+        import inspect as _inspect
+        accepts_input_ids = "input_ids" in _inspect.signature(self.get_mlp_output).parameters
         for batch_idx in range(num_batches):
             start_idx, end_idx = batch_idx * self.batch_size, min((batch_idx + 1) * self.batch_size, num_samples)
-            data_all['input'][start_idx:end_idx] = self.get_mlp_output(data_all['input'][start_idx:end_idx].to(self.device)).detach().cpu()
+            mlp_input = data_all['input'][start_idx:end_idx].to(self.device)
+            if accepts_input_ids and ids_buf is not None:
+                batch_ids = ids_buf[start_idx:end_idx].to(self.device, non_blocking=True)
+                out = self.get_mlp_output(mlp_input, input_ids=batch_ids)
+            else:
+                out = self.get_mlp_output(mlp_input)
+            data_all['input'][start_idx:end_idx] = out.detach().cpu()
         
     @torch.no_grad()
     def get_loss(self, layer_inputs, layer_outputs):
