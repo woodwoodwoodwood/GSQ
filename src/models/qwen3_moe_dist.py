@@ -366,6 +366,34 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
                     config.gptq.wbits, perchannel=True, sym=config.gptq.sym, mse=True, trits=config.gptq.trits
                 )
 
+        # ----- Temporarily zero e_score_correction_bias during calib -----
+        # TopKRouter relies on ``scores + e_score_correction_bias`` for top-k
+        # selection.  When the bias dominates the scores (common on models with
+        # ``num_hash_layers > 0`` where the first TopKRouter layer has a strong
+        # learnt bias), the same ~N experts are selected on every calib batch
+        # regardless of the input distribution.  This starves 256−N experts of
+        # calibration data → identity-Hessian fallback (RTN).
+        #
+        # During GPTQ calibration we temporarily zero the bias so that routing
+        # depends purely on ``scores`` (i.e. on the calibration data).  This
+        # gives every expert a fair chance to accumulate a Hessian.  After the
+        # calib loop we restore the original bias — GSQ training and inference
+        # are unaffected.
+        _calib_bias_orig = None
+        _calib_bias_gate = None
+        if self._is_moe_layer(self.current_layer_idx):
+            try:
+                _moe = self._moe_block(layer)
+                _gate = getattr(_moe, "gate", None)
+                if _gate is not None and hasattr(_gate, "e_score_correction_bias"):
+                    _bias = _gate.e_score_correction_bias
+                    if torch.is_tensor(_bias) and _bias.abs().sum().item() > 0.0:
+                        _calib_bias_orig = _bias.detach().clone()
+                        _calib_bias_gate = _gate
+                        _gate.e_score_correction_bias = torch.zeros_like(_bias)
+            except Exception:
+                pass
+
         n_hessian = config.gptq.nsamples // self.world_size
         calib_start = time.time()
         calib_report_interval = max(1, n_hessian // self.calib_report_divisor)
@@ -513,6 +541,32 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
                 f"router={router_kind} bias={bias_status} tid2eid={tid_status}",
                 flush=True,
             )
+            # When dead0 is non-trivial and bias is loaded, print the bias
+            # distribution so we can see whether bias is dominating the routing.
+            if (
+                g_zero > 0
+                and bias_t is not None
+                and torch.is_tensor(bias_t)
+                and bias_t.numel() > 1
+                and bias_t.abs().sum().item() > 0.0
+            ):
+                b = bias_t.cpu().float()
+                b_sorted, b_idx = b.sort(descending=True)
+                top_n = 12
+                top_info = ", ".join(
+                    f"e{b_idx[i].item():d}={b_sorted[i].item():.3f}"
+                    for i in range(min(top_n, b_sorted.numel()))
+                )
+                n_positive = (b > 0).sum().item()
+                n_negative = (b < 0).sum().item()
+                print(
+                    f"[GPTQ-CALIB][layer={layer_idx}] bias stats: "
+                    f"min={b.min().item():.3f} max={b.max().item():.3f} "
+                    f"mean={b.mean().item():.3f} std={b.std().item():.3f} "
+                    f"pos={n_positive} neg={n_negative} "
+                    f"| top12: {top_info}",
+                    flush=True,
+                )
             if g_zero > 0:
                 # Categorize the likely cause based on router type / bias state.
                 if "Hash" in router_kind and tid_status == "all_zero":
@@ -545,6 +599,14 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
                     flush=True,
                 )
         # ---------------------------------------------------------------------
+
+        # Restore the original calibration bias now that Hessian accumulation
+        # is done.  The restored bias will be used during GSQ training and
+        # inference — neither of which should see zeroed routing.
+        if _calib_bias_gate is not None and _calib_bias_orig is not None:
+            _calib_bias_gate.e_score_correction_bias = _calib_bias_orig
+            _calib_bias_orig = None
+            _calib_bias_gate = None
 
         gptq_losses = []
         for name in gpts:
