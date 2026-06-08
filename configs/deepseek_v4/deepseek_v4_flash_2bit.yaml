@@ -23,10 +23,10 @@ model:
   dtype: "bfloat16"
 
 data:
-  dataset_name: "c4"
+  dataset_name: "open_thoughts"
   batch_size: 128
   num_samples: 1024
-  max_length: 1024
+  max_length: 2048
   num_workers: 8
   val_samples: 128
 
@@ -61,7 +61,7 @@ training:
   ppl_eval_every_n_layers: 0
 
 gptq:
-  nsamples: 512
+  nsamples: 1024
   wbits: 2
   sym: true
   trits: false
