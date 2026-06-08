@@ -750,7 +750,7 @@ class BaseModelWrapper(ABC):
         if logging is not None:
             logging = logging.logger
         current_layer = self.get_layer_module(self.current_layer_idx)
-        self.groupsize = config.quantization.groupsize
+        self.configure_quantization_compression(config)
         subset = {}
         
         if is_attn:
@@ -924,6 +924,37 @@ class BaseModelWrapper(ABC):
             return self.get_current_layer()
         return None
     
+    def _infer_pack_num_bits(self, gsq_bits):
+        if gsq_bits is None:
+            return 4
+        if isinstance(gsq_bits, bool):
+            return 4
+        if isinstance(gsq_bits, int):
+            return max(1, gsq_bits)
+        if isinstance(gsq_bits, float):
+            return max(1, int(round(gsq_bits)))
+        if isinstance(gsq_bits, str):
+            tag = gsq_bits.strip().lower()
+            if tag in ("ternary", "1.58", "1_58"):
+                return 2
+            if tag == "nvfp4":
+                return 4
+            try:
+                return max(1, int(round(float(tag))))
+            except ValueError:
+                return 4
+        return 4
+
+    def configure_quantization_compression(self, config):
+        qcfg = getattr(config, "quantization", None)
+        if qcfg is None:
+            return
+        self.groupsize = getattr(qcfg, "groupsize", getattr(self, "groupsize", 32))
+        num_bits = self._infer_pack_num_bits(getattr(qcfg, "gsq_bits", None))
+        weights_cfg = self.quantization_config.config_groups.group_0.weights
+        weights_cfg.group_size = self.groupsize
+        weights_cfg.num_bits = num_bits
+
     def normalize_dtype(self, x):
         if isinstance(x, torch.dtype):
             return x

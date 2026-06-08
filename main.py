@@ -661,6 +661,8 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(config.model.name, use_fast=True, trust_remote_code=True)
     per_rank_batch = max(1, config.data.batch_size // world_size)
     model = get_model_wrapper(config.model.name, tokenizer, per_rank_batch, config.data.max_length, resolve_device(), config.model.dtype, world_size, dummy=config.model.dummy)
+    if hasattr(model, "configure_quantization_compression"):
+        model.configure_quantization_compression(config)
     model.meta_init_std = config.training.meta_init_std
     model.calib_report_divisor = config.logging.calib_report_divisor
     model.batch_report_divisor = config.logging.batch_report_divisor

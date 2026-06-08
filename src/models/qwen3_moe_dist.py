@@ -39,6 +39,7 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
     def _layer_prefixes(self, layer_name):
         layer_idx = int(layer_name.split('.')[-1])
         base = f"{self.layer_prefix}.{layer_idx}"
+        moe_attr = self._moe_block_attr()
         if not self._is_moe_layer(layer_idx):
             non_mlp = [
                 f"{base}.input_layernorm",
@@ -46,23 +47,24 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
                 f"{base}.post_attention_layernorm"
             ]
             local_expert = [
-                f"{base}.mlp"
+                f"{base}.{moe_attr}"
             ]
         else:
             non_mlp = [
                 f"{base}.input_layernorm",
                 f"{base}.self_attn",
-                f"{base}.mlp.gate",
+                f"{base}.{moe_attr}.gate",
+                f"{base}.{moe_attr}.shared_experts",
                 f"{base}.post_attention_layernorm"
             ]
             local_expert = [
-                f"{base}.mlp.experts.{e}"
+                f"{base}.{moe_attr}.experts.{e}"
                 for e in range(self.num_experts)
                 if self.sharder.owner(e) == self.rank
             ]
             mlp_offload_params = [
-                f"{base}.mlp.experts.gate_up_proj",
-                f"{base}.mlp.experts.down_proj",
+                f"{base}.{moe_attr}.experts.gate_up_proj",
+                f"{base}.{moe_attr}.experts.down_proj",
             ]
             return {"non_mlp": non_mlp, "mlp": local_expert, "mlp_offload_params": mlp_offload_params}
         return {"non_mlp": non_mlp, "mlp": local_expert}
@@ -85,7 +87,7 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
             mlp_input = x + attn_out
             if not self._is_moe_layer(self.current_layer_idx):
                 hidden_states = current_layer.post_attention_layernorm(mlp_input)
-                hidden_states = current_layer.mlp(hidden_states)
+                hidden_states = self._moe_block(current_layer)(hidden_states)
                 if isinstance(hidden_states, tuple):
                     hidden_states = hidden_states[0]
                 out = hidden_states + mlp_input
@@ -99,7 +101,7 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
         if not self._is_moe_layer(self.current_layer_idx):
             current_layer = self.get_layer_module(self.current_layer_idx)
             hidden_states = current_layer.post_attention_layernorm(mlp_input_batch)
-            hidden_states = current_layer.mlp(hidden_states)
+            hidden_states = self._moe_block(current_layer)(hidden_states)
             if isinstance(hidden_states, tuple):
                 hidden_states = hidden_states[0]
             return hidden_states + mlp_input_batch
@@ -144,7 +146,7 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
         hidden = layer.post_attention_layernorm(mlp_input_batch)
         x_flat = hidden.reshape(B * T, H)
 
-        router = layer.mlp.gate
+        router = self._moe_block(layer).gate
         topw, topi, top_k = self._router_topk(router, hidden.reshape(-1, H))
 
         tok_idx_flat = torch.arange(B * T, device=device, dtype=torch.long).repeat_interleave(top_k)
@@ -231,6 +233,14 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
         y_flat.index_add_(0, send_idx_flat, returned)
         y = y_flat.view(B, T, H)
 
+        moe_block = self._moe_block(self.get_layer_module(self.current_layer_idx))
+        shared_experts = getattr(moe_block, "shared_experts", None)
+        if shared_experts is not None:
+            shared_out = shared_experts(hidden)
+            if isinstance(shared_out, tuple):
+                shared_out = shared_out[0]
+            y = y + shared_out.view(B, T, H).to(y.dtype)
+
         return y + mlp_input_batch
 
     def calculate_mse(self, mlp_input_batch, quantized_weights, self_attn=False, validation=False, accumulation_steps=1):
@@ -249,7 +259,7 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
             hidden = layer.post_attention_layernorm(mlp_input_batch)
             x_flat = hidden.reshape(B * T, H)
 
-            router = layer.mlp.gate
+            router = self._moe_block(layer).gate
             _, topi, top_k = self._router_topk(router, hidden.reshape(-1, H))
 
             tok_idx_flat = torch.arange(B * T, device=device, dtype=torch.long).repeat_interleave(top_k)
@@ -327,13 +337,13 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
         layer_idx = self.current_layer_idx
         layer = self.get_layer_module(layer_idx)
         rank = self.rank
-        self.groupsize = config.quantization.groupsize
+        self.configure_quantization_compression(config)
 
         owned_experts = [e for e in range(self.num_experts) if self.sharder.owner(e) == rank]
         subset = {}
 
         for e in owned_experts:
-            base_prefix = f"{self.get_current_layer()}.mlp.experts.{e}"
+            base_prefix = f"{self._moe_base_prefix(self.get_current_layer())}.experts.{e}"
             for proj in ("gate_proj", "up_proj", "down_proj"):
                 subset[f"{base_prefix}.{proj}"] = self._virtual_expert_linear(layer_idx, e, proj)
 
@@ -513,7 +523,7 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
                 x = x + attn_out
                 if not self._is_moe_layer(i):
                     hidden_states = layer.post_attention_layernorm(x)
-                    hidden_states = layer.mlp(hidden_states)
+                    hidden_states = self._moe_block(layer)(hidden_states)
                     if isinstance(hidden_states, tuple):
                         hidden_states = hidden_states[0]
                     x = hidden_states + x
@@ -580,7 +590,7 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
         layer_key = self.get_current_layer()
         owned = [e for e in range(self.num_experts) if self.sharder.owner(e) == self.rank]
         for e in owned:
-            base = f"{layer_key}.mlp.experts.{e}"
+            base = f"{self._moe_base_prefix(layer_key)}.experts.{e}"
             gk = f"{base}.gate_proj"
             if gk not in self.temp_weights:
                 continue

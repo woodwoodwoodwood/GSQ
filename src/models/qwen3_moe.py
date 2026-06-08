@@ -30,9 +30,19 @@ class Qwen3MoeWrapper(BaseModelWrapper):
             return False
         return self.num_experts > 0 and (layer_idx + 1) % self.decoder_sparse_step == 0
 
+    def _moe_block_attr(self):
+        return getattr(self, "_MOE_BLOCK_ATTR", "mlp")
+
+    def _moe_block(self, layer):
+        return getattr(layer, self._moe_block_attr())
+
+    def _moe_base_prefix(self, layer_key):
+        return f"{layer_key}.{self._moe_block_attr()}"
+
     def _layer_prefixes(self, layer_name):
         layer_idx = int(layer_name.split('.')[-1])
         base = f"{self.layer_prefix}.{layer_idx}"
+        moe_attr = self._moe_block_attr()
         if not self._is_moe_layer(layer_idx):
             non_mlp = [
                 f"{base}.input_layernorm",
@@ -40,28 +50,29 @@ class Qwen3MoeWrapper(BaseModelWrapper):
                 f"{base}.post_attention_layernorm"
             ]
             mlp = [
-                f"{base}.mlp"
+                f"{base}.{moe_attr}"
             ]
             return {"non_mlp": non_mlp, "mlp": mlp}
         non_mlp = [
             f"{base}.input_layernorm",
             f"{base}.self_attn",
-            f"{base}.mlp.gate",
+            f"{base}.{moe_attr}.gate",
+            f"{base}.{moe_attr}.shared_experts",
             f"{base}.post_attention_layernorm"
         ]
         mlp = [
-            f"{base}.mlp.experts.{e}"
+            f"{base}.{moe_attr}.experts.{e}"
             for e in range(self.num_experts)
         ]
         mlp_offload_params = [
-            f"{base}.mlp.experts.gate_up_proj",
-            f"{base}.mlp.experts.down_proj",
+            f"{base}.{moe_attr}.experts.gate_up_proj",
+            f"{base}.{moe_attr}.experts.down_proj",
         ]
         return {"non_mlp": non_mlp, "mlp": mlp, "mlp_offload_params": mlp_offload_params}
 
     def _virtual_expert_linear(self, layer_idx, expert_id, proj_name):
         layer = self.model.model.layers[layer_idx]
-        experts = layer.mlp.experts
+        experts = self._moe_block(layer).experts
         intermediate_dim = self.fused_expert_intermediate_size
         hidden_dim = self.model.config.hidden_size
         if proj_name == "gate_proj":
@@ -81,7 +92,8 @@ class Qwen3MoeWrapper(BaseModelWrapper):
     def _fused_expert_forward_batched(self, xin, eids, quantized_weights=None, gpts_calib=None):
         layer = self.get_layer_module(self.current_layer_idx)
         layer_key = self.get_current_layer()
-        experts = layer.mlp.experts
+        moe_base = self._moe_base_prefix(layer_key)
+        experts = self._moe_block(layer).experts
         intermediate_dim = self.fused_expert_intermediate_size
 
         eids_long = eids.to(torch.long)
@@ -106,7 +118,7 @@ class Qwen3MoeWrapper(BaseModelWrapper):
             out_e = F.linear(hidden_act, down_w)
 
             if quantized_weights is not None:
-                key = f"{layer_key}.mlp.experts.{eid_val}"
+                key = f"{moe_base}.experts.{eid_val}"
                 if key in quantized_weights:
                     # Nested dict format (distributed mode)
                     qw = quantized_weights[key]
@@ -124,7 +136,7 @@ class Qwen3MoeWrapper(BaseModelWrapper):
                 out_e = F.linear(hidden_act, down_w_q[0] if isinstance(down_w_q, tuple) else down_w_q)
 
             if gpts_calib is not None:
-                lk = f"{layer_key}.mlp.experts.{eid_val}"
+                lk = f"{moe_base}.experts.{eid_val}"
                 gk = f"{lk}.gate_proj"
                 dk = f"{lk}.down_proj"
                 if gk in gpts_calib:
@@ -172,7 +184,7 @@ class Qwen3MoeWrapper(BaseModelWrapper):
         B, T, H = mlp_input_batch.shape
         hidden = layer.post_attention_layernorm(mlp_input_batch)
         x_flat = hidden.reshape(B * T, H)
-        router = layer.mlp.gate
+        router = self._moe_block(layer).gate
         topw, topi, top_k = self._router_topk(router, hidden.reshape(-1, H))
         tok_idx_flat = torch.arange(B * T, device=self.device, dtype=torch.long).repeat_interleave(top_k)
         eid_flat = topi.reshape(-1).to(torch.long)
@@ -183,7 +195,8 @@ class Qwen3MoeWrapper(BaseModelWrapper):
         layer = self.get_layer_module(self.current_layer_idx)
         B, T, H = mlp_input_batch.shape
         x_flat, tok_idx_flat, eid_flat, w_flat, hidden = self._route_tokens_flat(mlp_input_batch)
-        router = layer.mlp.gate
+        moe_block = self._moe_block(layer)
+        router = moe_block.gate
         top_k = router.top_k
 
         sort_perm = torch.argsort(eid_flat, stable=True)
@@ -219,7 +232,18 @@ class Qwen3MoeWrapper(BaseModelWrapper):
 
         y_flat = x_flat.new_zeros(x_flat.shape)
         y_flat.index_add_(0, tok_idx_flat, out_gather)
-        return y_flat.view(B, T, H) + mlp_input_batch
+
+        shared_out = 0
+        shared_experts = getattr(moe_block, "shared_experts", None)
+        if shared_experts is not None:
+            shared_out = shared_experts(hidden)
+            if isinstance(shared_out, tuple):
+                shared_out = shared_out[0]
+
+        routed = y_flat.view(B, T, H)
+        if isinstance(shared_out, torch.Tensor):
+            routed = routed + shared_out.to(routed.dtype)
+        return routed + mlp_input_batch
 
     def move_embed_to(self, device):
         names = self._names_from_ckpt(["model.embed_tokens"])
@@ -253,7 +277,7 @@ class Qwen3MoeWrapper(BaseModelWrapper):
 
         if not self._is_moe_layer(self.current_layer_idx):
             hidden_states = current_layer.post_attention_layernorm(mlp_input_batch)
-            hidden_states = current_layer.mlp(hidden_states)
+            hidden_states = self._moe_block(current_layer)(hidden_states)
             if isinstance(hidden_states, tuple):
                 hidden_states = hidden_states[0]
             return hidden_states + mlp_input_batch
@@ -267,7 +291,7 @@ class Qwen3MoeWrapper(BaseModelWrapper):
         parsed = self._parse_fused_expert_module_base(ln)
         if parsed and self.fused_experts:
             layer_prefix, expert_idx, proj_kind = parsed
-            experts_mod = self.model.get_submodule(f"{layer_prefix}.mlp.experts")
+            experts_mod = self.model.get_submodule(f"{layer_prefix}.{self._moe_block_attr()}.experts")
             intermediate_dim = self.fused_expert_intermediate_size
             if isinstance(quantized_weights, tuple):
                 Q, scales = quantized_weights
@@ -325,13 +349,13 @@ class Qwen3MoeWrapper(BaseModelWrapper):
         if is_attn:
             return super().get_layer_initialization(trainer, gpt_all, config, logging, is_attn=True)
         current_layer = self.get_layer_module(self.current_layer_idx)
-        self.groupsize = config.quantization.groupsize
+        self.configure_quantization_compression(config)
         if not self._is_moe_layer(self.current_layer_idx):
             return super().get_layer_initialization(trainer, gpt_all, config, logging, is_attn=False)
 
         if logging is not None:
             logging = logging.logger
-        base_prefix = f"{self.get_current_layer()}.mlp"
+        base_prefix = self._moe_base_prefix(self.get_current_layer())
         subset = {}
         for e in range(self.num_experts):
             for proj in ("gate_proj", "up_proj", "down_proj"):
@@ -410,7 +434,7 @@ class Qwen3MoeWrapper(BaseModelWrapper):
             return
         layer_key = self.get_current_layer()
         for e in range(self.num_experts):
-            base = f"{layer_key}.mlp.experts.{e}"
+            base = f"{self._moe_base_prefix(layer_key)}.experts.{e}"
             gk = f"{base}.gate_proj"
             if gk not in self.temp_weights:
                 continue
