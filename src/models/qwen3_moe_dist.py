@@ -114,34 +114,11 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
             return hidden_states + mlp_input_batch
         return self.run_expert_parallel(mlp_input_batch, input_ids=input_ids)
 
-    def _router_topk(self, router, flat_hidden):
-        import inspect
-
-        sig_params = list(inspect.signature(router.forward).parameters.keys())
-        if "input_ids" in sig_params:
-            dummy_input_ids = torch.arange(
-                flat_hidden.shape[0],
-                device=flat_hidden.device,
-                dtype=torch.long,
-            )
-            router_out = router(flat_hidden, dummy_input_ids)
-        else:
-            router_out = router(flat_hidden)
-
-        if isinstance(router_out, tuple) and len(router_out) == 3:
-            _, topw, topi = router_out
-        elif isinstance(router_out, tuple) and len(router_out) == 2:
-            topw, topi = router_out
-        else:
-            raise RuntimeError(
-                f"Unexpected router output of len={len(router_out) if isinstance(router_out, tuple) else 'NA'} "
-                f"for {type(router).__name__}"
-            )
-
-        top_k = getattr(router, "top_k", None) or getattr(router, "num_experts_per_tok", None)
-        if top_k is None:
-            top_k = topi.shape[-1]
-        return topw, topi, top_k
+    def _router_topk(self, router, flat_hidden, input_ids=None):
+        # Forward to the parent (Qwen3MoeWrapper) implementation which handles
+        # the input_ids plumbing for hash-routed MoE (DeepSeek-V4-Flash) and
+        # falls back to ``arange`` dummies for non-hash routers.
+        return super()._router_topk(router, flat_hidden, input_ids=input_ids)
 
     def _dispatch_tokens(self, mlp_input_batch, input_ids=None):
         """Route tokens to expert-owning ranks via all-to-all.
