@@ -456,7 +456,7 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
 
     @torch.no_grad()
     def ppl_evaluation(self, read_from_disk=-1):
-        dataset = get_dataset("open_thoughts", self.tokenizer)
+        dataset = get_dataset("open_thoughts", self.tokenizer, ppl_max_samples=128)
         testloader = prepare_test_dataloader(
                 dataset=dataset["test"],
                 tokenizer=self.tokenizer,

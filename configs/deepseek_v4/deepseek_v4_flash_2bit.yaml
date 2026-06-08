@@ -53,7 +53,7 @@ training:
   log_dir: "logs/deepseek-v4-flash-2bit"
   act_cache_dir: "cache/act_cache"
   eval_baseline: false
-  ppl_eval_every_n_layers: 0
+  ppl_eval_every_n_layers: 1
 
 gptq:
   nsamples: 512

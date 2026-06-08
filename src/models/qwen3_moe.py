@@ -453,7 +453,7 @@ class Qwen3MoeWrapper(BaseModelWrapper):
 
     @torch.no_grad()
     def ppl_evaluation(self, read_from_disk=-1):
-        dataset = get_dataset("wikitext2", self.tokenizer)
+        dataset = get_dataset("wikitext2", self.tokenizer, ppl_max_samples=128)
         testloader = prepare_test_dataloader(
                 dataset=dataset["test"],
                 tokenizer=self.tokenizer,
