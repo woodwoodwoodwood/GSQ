@@ -474,20 +474,74 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
                 severity = "DEAD"
             elif g_under > 0:
                 severity = "UNDERFED"
+
+            # Router introspection: distinguish "hash router missed input_ids"
+            # from "topk router bias not loaded" from "real routing collapse".
+            try:
+                _moe_block = self._moe_block(layer)
+                _router = getattr(_moe_block, "gate", None)
+                router_kind = type(_router).__name__ if _router is not None else "None"
+                bias_t = getattr(_router, "e_score_correction_bias", None)
+                if bias_t is None:
+                    bias_status = "no_bias"
+                elif not torch.is_tensor(bias_t):
+                    bias_status = "not_tensor"
+                else:
+                    nonzero = bias_t.abs().sum().item()
+                    if not torch.isfinite(bias_t).all().item():
+                        bias_status = "nonfinite"
+                    elif nonzero == 0.0:
+                        bias_status = "all_zero"
+                    else:
+                        bias_status = f"loaded_abs_sum={nonzero:.3f}"
+                tid2eid_t = getattr(_router, "tid2eid", None)
+                if tid2eid_t is None:
+                    tid_status = "no_tid2eid"
+                else:
+                    tid_nz = tid2eid_t.abs().sum().item() if torch.is_tensor(tid2eid_t) else -1
+                    tid_status = "all_zero" if tid_nz == 0 else "loaded"
+            except Exception as _e:
+                router_kind = "unknown"
+                bias_status = f"introspect_err={_e}"
+                tid_status = "?"
+
             print(
                 f"[GPTQ-CALIB][layer={layer_idx}] expert tokens "
                 f"min/mean/max={g_min_pos}/{int(g_mean)}/{g_max} "
                 f"experts(total={g_owned}, dead0={g_zero}, "
-                f"under{UNDERFED_THRESHOLD}={g_under}) [{severity}]",
+                f"under{UNDERFED_THRESHOLD}={g_under}) [{severity}] "
+                f"router={router_kind} bias={bias_status} tid2eid={tid_status}",
                 flush=True,
             )
             if g_zero > 0:
+                # Categorize the likely cause based on router type / bias state.
+                if "Hash" in router_kind and tid_status == "all_zero":
+                    reason = (
+                        "HashRouter.tid2eid not loaded (all zero) -> all tokens route to expert 0. "
+                        "Fix: ensure 'ffn.gate.tid2eid' ckpt key reaches the model param."
+                    )
+                elif "Hash" in router_kind:
+                    reason = (
+                        "HashRouter receiving wrong/no input_ids. "
+                        "Fix: ensure data_dict['input_ids'] is populated and threaded through."
+                    )
+                elif bias_status == "all_zero":
+                    reason = (
+                        "TopKRouter e_score_correction_bias not loaded (all zero); the load-balancing "
+                        "bias is what keeps DeepSeek-style routing diverse on small calib batches. "
+                        "Fix: ensure 'ffn.gate.bias' ckpt key maps to 'gate.e_score_correction_bias' "
+                        "on the model. dead0 will plummet once it is loaded."
+                    )
+                else:
+                    reason = (
+                        "Real routing skew on this calibration data (not a loader bug). "
+                        f"Increase config.gptq.nsamples (currently {config.gptq.nsamples}), "
+                        "increase data.max_length, or switch to a more diverse calib dataset."
+                    )
                 print(
                     f"[GPTQ-CALIB][layer={layer_idx}] WARNING: {g_zero} expert(s) "
                     f"received 0 calib tokens; identity-Hessian fallback ⇒ effectively RTN "
-                    f"for these experts. To reduce: increase config.gptq.nsamples "
-                    f"(currently {config.gptq.nsamples}), increase data.max_length, "
-                    f"or use a calibration set whose token distribution exercises more experts.",
+                    f"for these experts. Likely cause: {reason}",
                     flush=True,
                 )
         # ---------------------------------------------------------------------
