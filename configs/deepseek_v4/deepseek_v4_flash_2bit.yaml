@@ -61,7 +61,7 @@ training:
   ppl_eval_every_n_layers: 0
 
 gptq:
-  nsamples: 1024
+  nsamples: 512
   wbits: 2
   sym: true
   trits: false
