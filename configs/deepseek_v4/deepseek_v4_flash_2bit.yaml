@@ -34,7 +34,7 @@ quantization:
   gsq_bits: 2
   init_method: "gptq"
   gsq_enabled: true
-  start_layer: 3
+  start_layer: 0
   self_attn: false
   std: 0.01
   temperature: [2, 0.05]
