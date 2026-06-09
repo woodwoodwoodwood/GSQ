@@ -40,6 +40,15 @@ class DeepseekV4DistributedWrapper(DeepseekV4Wrapper, Qwen3MoeDistributedWrapper
         self.decoder_sparse_step = getattr(text_cfg, "decoder_sparse_step", 1)
         self.mlp_only_layers = list(getattr(text_cfg, "mlp_only_layers", []))
 
+        # Manifold-Constrained Hyper-Connection (mHC) multiplicity. The hidden
+        # state through every DeepseekV4DecoderLayer is shaped
+        # ``[B, S, hc_mult, D]``, mixed in/out by ``attn_hc`` / ``ffn_hc``.
+        # See ``modular_deepseek_v4.py`` lines 765-841 (paper §2.2). Mirrors
+        # the same assignment in ``DeepseekV4Wrapper.__init__``; required here
+        # because this class bypasses ``DeepseekV4Wrapper.__init__`` and goes
+        # straight to ``BaseModelWrapper.__init__``.
+        self.hc_mult = int(getattr(text_cfg, "hc_mult", 1))
+
         if hasattr(self.model, "layers") and hasattr(self.model.layers, "__len__"):
             self._layers_module = self.model.layers
             self.layer_prefix = "layers"
@@ -269,17 +278,21 @@ class DeepseekV4DistributedWrapper(DeepseekV4Wrapper, Qwen3MoeDistributedWrapper
         layer = self.get_layer_module(self.current_layer_idx)
 
         post, comb, collapsed = self._ffn_collapse(layer, mlp_input_batch)
-        post_LN = layer.post_attention_layernorm(collapsed)
 
         if not self._is_moe_layer(self.current_layer_idx):
-            mlp_out = self._moe_block(layer)(post_LN)
+            # Dense MLP path: this branch does NOT go through ``_dispatch_tokens``,
+            # which is where the MoE branch picks up its ``post_attention_layernorm``.
+            # To match HF line 1018 (one LN before the MLP), apply it explicitly here.
+            mlp_out = self._moe_block(layer)(layer.post_attention_layernorm(collapsed))
             if isinstance(mlp_out, tuple):
                 mlp_out = mlp_out[0]
         else:
-            # Distributed MoE on 3D collapsed-post-LN; skip residual because
-            # the HC combine handles residual mixing externally.
+            # Distributed MoE: ``run_expert_parallel`` (via ``_dispatch_tokens``)
+            # applies ``post_attention_layernorm`` internally, so we MUST pass
+            # the pre-LN ``collapsed`` here. Passing ``post_LN`` would cause a
+            # double LN that does not match HF's single LN at line 1018.
             mlp_out = self.run_expert_parallel(
-                post_LN,
+                collapsed,
                 quantized_weights=None,
                 input_ids=input_ids,
                 skip_residual=True,
@@ -397,13 +410,15 @@ class DeepseekV4DistributedWrapper(DeepseekV4Wrapper, Qwen3MoeDistributedWrapper
         # Attn site: 4D → 4D
         x = self._attn_site_forward(layer, x, additional_layer_inputs)
 
-        # Ffn site: 4D → 3D collapsed → post-LN → MoE Hessian
+        # Ffn site: 4D → 3D collapsed → MoE Hessian.
+        # ``run_expert_parallel`` (via ``_dispatch_tokens``) applies
+        # ``post_attention_layernorm`` internally, so feed it pre-LN
+        # ``collapsed`` to match HF's single LN at line 1018.
         if self._is_moe_layer(self.current_layer_idx):
             post, comb, collapsed = self._ffn_collapse(layer, x)
             del post, comb  # only need collapsed for Hessian
-            post_LN = layer.post_attention_layernorm(collapsed)
             _ = self.run_expert_parallel(
-                post_LN,
+                collapsed,
                 quantized_weights=None,
                 gpts_calib=gpts,
                 input_ids=batch_input_ids,
