@@ -135,8 +135,23 @@ def save_progress(run_dir, layer_idx, run_id=None, wandb_run_id=None):
         json.dump(progress, f, indent=2)
     os.replace(tmp_path, path)
 
-def create_dict(num_samples, seqlen, hidden_size, dtype, mmap_dir=None, mmap_threshold_bytes=2 * 1024 ** 3):
-    nbytes = num_samples * seqlen * hidden_size * 2  # 2 bytes for any 16-bit dtype
+def create_dict(num_samples, seqlen, hidden_size, dtype, hc_mult=1, mmap_dir=None, mmap_threshold_bytes=2 * 1024 ** 3):
+    """Allocate the activation cache buffers used by GSQ.
+
+    ``hc_mult`` (default 1) selects between standard Pre-LN residual storage
+    ``[N, S, D]`` and Hyper-Connection (mHC) residual storage
+    ``[N, S, hc_mult, D]`` used by DeepSeek-V4-Flash. For HC models the layer
+    state is a stack of ``hc_mult`` parallel residual streams that the decoder
+    layer mixes via two ``DeepseekV4HyperConnection`` modules (paper §2.2);
+    we have to preserve the full 4D state across layer boundaries because the
+    next layer's HC mapping is a non-trivial function of all streams.
+    """
+    if hc_mult > 1:
+        nbytes = num_samples * seqlen * hc_mult * hidden_size * 2
+        shape = (num_samples, seqlen, hc_mult, hidden_size)
+    else:
+        nbytes = num_samples * seqlen * hidden_size * 2
+        shape = (num_samples, seqlen, hidden_size)
     # input_ids are needed by hash-routed MoE (e.g. DeepSeek-V4-Flash) so the
     # MoE dispatcher can compute the real tid2eid[input_ids] routing instead of
     # falling back to ``arange(seqlen)`` dummy ids (which routes every batch to
@@ -145,11 +160,12 @@ def create_dict(num_samples, seqlen, hidden_size, dtype, mmap_dir=None, mmap_thr
     if mmap_dir is not None and nbytes > mmap_threshold_bytes:
         import numpy as np
         os.makedirs(mmap_dir, exist_ok=True)
-        path = os.path.join(mmap_dir, f"act_{os.getpid()}_{num_samples}x{seqlen}x{hidden_size}.bin")
-        arr = np.memmap(path, dtype='uint16', mode='w+', shape=(num_samples, seqlen, hidden_size))
+        shape_tag = "x".join(str(s) for s in shape)
+        path = os.path.join(mmap_dir, f"act_{os.getpid()}_{shape_tag}.bin")
+        arr = np.memmap(path, dtype='uint16', mode='w+', shape=shape)
         inps = torch.from_numpy(arr).view(dtype)
         return {'input': inps, 'input_ids': input_ids, '_mmap_path': path}
-    inps = torch.zeros((num_samples, seqlen, hidden_size), dtype=dtype, device='cpu')
+    inps = torch.zeros(shape, dtype=dtype, device='cpu')
     return {'input': inps, 'input_ids': input_ids}
 
 
@@ -206,9 +222,10 @@ def train_all_layers(model, train_loader, val_loader, gpt_loader, logger, config
 
     mmap_dir = config.training.act_cache_dir or None
     mmap_threshold = int(config.training.act_cache_mmap_threshold_gb * 1024 ** 3)
-    train_all = create_dict(len(train_loader.dataset), model.model.seqlen, hidden_size, dtype, mmap_dir, mmap_threshold)
-    val_all = create_dict(len(val_loader.dataset), model.model.seqlen, hidden_size, dtype, mmap_dir, mmap_threshold)
-    gpt_all = create_dict(len(gpt_loader.dataset), model.model.seqlen, hidden_size, dtype, mmap_dir, mmap_threshold)
+    hc_mult = int(getattr(model, "hc_mult", 1))
+    train_all = create_dict(len(train_loader.dataset), model.model.seqlen, hidden_size, dtype, hc_mult=hc_mult, mmap_dir=mmap_dir, mmap_threshold_bytes=mmap_threshold)
+    val_all = create_dict(len(val_loader.dataset), model.model.seqlen, hidden_size, dtype, hc_mult=hc_mult, mmap_dir=mmap_dir, mmap_threshold_bytes=mmap_threshold)
+    gpt_all = create_dict(len(gpt_loader.dataset), model.model.seqlen, hidden_size, dtype, hc_mult=hc_mult, mmap_dir=mmap_dir, mmap_threshold_bytes=mmap_threshold)
 
     try:
         if GLOBAL_RANK == 0:

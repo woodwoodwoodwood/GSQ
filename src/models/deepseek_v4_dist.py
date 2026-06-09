@@ -15,6 +15,7 @@ import torch.distributed as dist
 from .base import BaseModelWrapper
 from .deepseek_v4 import DeepseekV4Wrapper
 from .qwen3_moe_dist import Qwen3MoeDistributedWrapper
+from src.moe.autograd_ops import AllToAllTokens
 
 
 class DeepseekV4DistributedWrapper(DeepseekV4Wrapper, Qwen3MoeDistributedWrapper):
@@ -179,3 +180,233 @@ class DeepseekV4DistributedWrapper(DeepseekV4Wrapper, Qwen3MoeDistributedWrapper
             self._ppl_disabled_logged = True
 
         return float("nan")
+
+    # ====================================================================== #
+    # mHC (Manifold-Constrained Hyper-Connection) forward                     #
+    # ====================================================================== #
+    #
+    # DeepSeek-V4-Flash decoder layers carry a 4D residual state
+    # ``[B, S, hc_mult, D]`` instead of the standard 3D ``[B, S, D]``. Each
+    # layer mixes the streams in/out via two ``DeepseekV4HyperConnection``
+    # modules (``attn_hc`` / ``ffn_hc``) — see ``modular_deepseek_v4.py:1011-1021``.
+    #
+    # ``HyperConnection.forward(hidden_4D)`` returns ``(post, comb, collapsed)``
+    # where ``collapsed`` is a 3D weighted sum across the ``hc_mult`` axis (the
+    # input the sublayer attention/MLP sees) and ``post`` / ``comb`` are the
+    # per-stream output projection / Sinkhorn-projected combine matrix used to
+    # produce the next 4D state from the sublayer's 3D output.
+    #
+    # The overrides below replace the Pre-LN ``x + sublayer(LN(x))`` residual
+    # used by ``Qwen3MoeDistributedWrapper`` with the correct mHC residual.
+
+    @torch.no_grad()
+    def _attn_site_forward(self, layer, hidden_4D, additional_layer_inputs):
+        """Apply the attention site of one decoder layer with mHC residual.
+
+        ``hidden_4D`` shape: ``[B, S, hc_mult, D]``. Returns the post-attention
+        4D residual state (mirrors HF lines 1011-1015).
+        """
+        dtype = hidden_4D.dtype
+        post, comb, collapsed = layer.attn_hc(hidden_4D)
+        attn_out = layer.self_attn(layer.input_layernorm(collapsed), **additional_layer_inputs)
+        if isinstance(attn_out, tuple):
+            attn_out = attn_out[0]
+        # post: [B, S, H], attn_out: [B, S, D], comb: [B, S, H, H], hidden_4D: [B, S, H, D]
+        return (
+            post.to(dtype).unsqueeze(-1) * attn_out.unsqueeze(-2)
+            + torch.matmul(comb.to(dtype).transpose(-1, -2), hidden_4D)
+        )
+
+    @torch.no_grad()
+    def _ffn_collapse(self, layer, hidden_4D):
+        """Apply ffn_hc to get the 3D collapsed input for the MoE block.
+
+        Returns ``(post, comb, collapsed_3D)``. The caller runs the MoE on
+        ``collapsed_3D`` and combines via ``_ffn_combine`` to produce the
+        next 4D state.
+        """
+        post, comb, collapsed = layer.ffn_hc(hidden_4D)
+        return post, comb, collapsed
+
+    def _ffn_combine(self, post, comb, hidden_4D, mlp_output_3D):
+        """4D state, 3D MoE output, ffn_hc tensors → next 4D state.
+
+        Mirrors HF lines 1019-1021.
+        """
+        dtype = hidden_4D.dtype
+        return (
+            post.to(dtype).unsqueeze(-1) * mlp_output_3D.unsqueeze(-2)
+            + torch.matmul(comb.to(dtype).transpose(-1, -2), hidden_4D)
+        )
+
+    @torch.no_grad()
+    def _build_layer_inputs(self):
+        """Re-create ``additional_layer_inputs`` dict with captured kwargs."""
+        kwargs = {"attention_mask": None}
+        for k, v in self.kwargs.items():
+            kwargs[k] = v
+        return kwargs
+
+    # ---- Overrides --------------------------------------------------------- #
+
+    @torch.no_grad()
+    def get_mlp_input(self, batch):
+        """Override: full attn site, 4D in → 4D out.
+
+        Parent class assumes Pre-LN: ``x + attn(LN(x))``. mHC needs the
+        attn_hc combine instead.
+        """
+        layer = self.get_layer_module(self.current_layer_idx)
+        return self._attn_site_forward(layer, batch, self._build_layer_inputs())
+
+    @torch.no_grad()
+    def get_mlp_output(self, mlp_input_batch, input_ids=None):
+        """Override: full ffn site, 4D in → 4D out.
+
+        ``mlp_input_batch`` here is the 4D post-attention residual produced
+        by ``get_mlp_input`` above (NOT a 3D MoE input as in the parent class).
+        """
+        layer = self.get_layer_module(self.current_layer_idx)
+
+        post, comb, collapsed = self._ffn_collapse(layer, mlp_input_batch)
+        post_LN = layer.post_attention_layernorm(collapsed)
+
+        if not self._is_moe_layer(self.current_layer_idx):
+            mlp_out = self._moe_block(layer)(post_LN)
+            if isinstance(mlp_out, tuple):
+                mlp_out = mlp_out[0]
+        else:
+            # Distributed MoE on 3D collapsed-post-LN; skip residual because
+            # the HC combine handles residual mixing externally.
+            mlp_out = self.run_expert_parallel(
+                post_LN,
+                quantized_weights=None,
+                input_ids=input_ids,
+                skip_residual=True,
+            )
+        return self._ffn_combine(post, comb, mlp_input_batch, mlp_out)
+
+    @torch.no_grad()
+    def get_layer_activations(self, data_all):
+        """Override: 4D activation propagation via full mHC layer forward.
+
+        Reads layer-input 4D from ``data_all['input']``, applies the full
+        decoder layer (attn site + ffn site, both with mHC), writes layer-
+        output 4D back to ``data_all['input']``.
+        """
+        current_layer = self.get_layer_module(self.current_layer_idx)
+        num_samples = data_all['input'].shape[0]
+        num_batches = (num_samples + self.batch_size - 1) // self.batch_size
+        ids_buf = data_all.get('input_ids', None) if isinstance(data_all, dict) else None
+        for batch_idx in range(num_batches):
+            start_idx = batch_idx * self.batch_size
+            end_idx = min((batch_idx + 1) * self.batch_size, num_samples)
+            x = data_all['input'][start_idx:end_idx].to(self.device, non_blocking=True)
+
+            # Attn site
+            x = self._attn_site_forward(current_layer, x, self._build_layer_inputs())
+
+            # Ffn site (real input_ids for HashRouter, None for TopKRouter)
+            if ids_buf is not None:
+                batch_ids = ids_buf[start_idx:end_idx].to(self.device, non_blocking=True)
+            else:
+                batch_ids = None
+            x = self.get_mlp_output(x, input_ids=batch_ids)
+
+            data_all['input'][start_idx:end_idx] = x.detach().cpu()
+
+    def calculate_mse(self, mlp_input_batch, quantized_weights, self_attn=False, validation=False, accumulation_steps=1, input_ids=None):
+        """Override: HC-aware MoE-output MSE.
+
+        ``mlp_input_batch`` is the 4D post-attn residual produced by
+        ``get_mlp_input_all``. We apply ``ffn_hc`` to get the 3D collapsed
+        input that the MoE actually sees, then dispatch tokens and compute
+        the MSE between quantized and unquantized MoE outputs (3D), exactly
+        like the parent class — only the input shape and the ffn_hc step
+        differ.
+        """
+        # Dense (non-MoE) layers — DeepSeek-V4-Flash has none, but be safe.
+        if not self._is_moe_layer(self.current_layer_idx):
+            return super().calculate_mse(
+                mlp_input_batch, quantized_weights,
+                self_attn=self_attn, validation=validation,
+                accumulation_steps=accumulation_steps,
+                input_ids=input_ids,
+            )
+
+        layer = self.get_layer_module(self.current_layer_idx)
+        device = self.device
+
+        # mHC ffn-site collapse: 4D → 3D collapsed
+        with torch.no_grad():
+            post, comb, collapsed = self._ffn_collapse(layer, mlp_input_batch)
+            hidden = layer.post_attention_layernorm(collapsed)
+
+            B, T, H = hidden.shape
+            x_flat = hidden.reshape(B * T, H)
+
+            router = self._moe_block(layer).gate
+            _, topi, top_k = self._router_topk(router, x_flat, input_ids=input_ids)
+
+            tok_idx_flat = torch.arange(B * T, device=device, dtype=torch.long).repeat_interleave(top_k)
+            eid_flat = topi.reshape(-1).to(torch.long)
+
+            owner_lut = self._owner_lut.to(device)
+            owners_flat = owner_lut[eid_flat]
+            perm = torch.argsort(owners_flat, stable=True)
+            owners_flat = owners_flat.index_select(0, perm)
+            send_idx_flat = tok_idx_flat.index_select(0, perm)
+            send_eid_flat = eid_flat.index_select(0, perm)
+            send_x_flat = x_flat.index_select(0, send_idx_flat)
+
+            world_size = self.world_size
+            in_sizes_tensor = torch.bincount(owners_flat, minlength=world_size).to(torch.long)
+            all_sizes = [torch.empty_like(in_sizes_tensor) for _ in range(world_size)]
+            dist.all_gather(all_sizes, in_sizes_tensor)
+            recv_sizes = torch.stack(all_sizes)[:, self.rank]
+            out_split_sizes = recv_sizes.tolist()
+            in_split_sizes = in_sizes_tensor.tolist()
+
+            pg = dist.group.WORLD
+            xin = AllToAllTokens.apply(send_x_flat, out_split_sizes, in_split_sizes, pg)
+            eids = AllToAllTokens.apply(send_eid_flat.unsqueeze(1), out_split_sizes, in_split_sizes, pg).squeeze(1)
+
+        with torch.no_grad():
+            out_fp = self._batched_expert_forward(xin, eids, quantized_weights=None)
+        out_q = self._batched_expert_forward(xin, eids, quantized_weights=quantized_weights)
+
+        total_mse = self.loss_fn(out_q, out_fp)
+        if not validation:
+            # Same dead-batch guard as the parent (rank with 0 routed tokens).
+            if total_mse.requires_grad and total_mse.grad_fn is not None:
+                (total_mse / accumulation_steps).backward()
+
+        # Free the unused HC tensors.
+        del post, comb, collapsed
+        return total_mse.item()
+
+    @torch.no_grad()
+    def _gptq_calib_step(self, layer, x, additional_layer_inputs, batch_input_ids, gpts):
+        """Override: HC-aware GPTQ Hessian accumulation step.
+
+        ``x`` is the 4D layer input ``[B, S, hc_mult, D]`` from ``gpt_all``.
+        Build the correct 3D MoE input via attn site + ffn_hc, then dispatch
+        through ``run_expert_parallel`` with ``gpts_calib=gpts`` so the per-
+        expert linears see the production-time activation distribution.
+        """
+        # Attn site: 4D → 4D
+        x = self._attn_site_forward(layer, x, additional_layer_inputs)
+
+        # Ffn site: 4D → 3D collapsed → post-LN → MoE Hessian
+        if self._is_moe_layer(self.current_layer_idx):
+            post, comb, collapsed = self._ffn_collapse(layer, x)
+            del post, comb  # only need collapsed for Hessian
+            post_LN = layer.post_attention_layernorm(collapsed)
+            _ = self.run_expert_parallel(
+                post_LN,
+                quantized_weights=None,
+                gpts_calib=gpts,
+                input_ids=batch_input_ids,
+                skip_residual=True,
+            )
+        # Dense MLP layers: nothing to calibrate via expert parallel.

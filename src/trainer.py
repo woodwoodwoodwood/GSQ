@@ -254,7 +254,10 @@ class QuantizationTrainer:
     def train_step(self, batch, temperature, scale, microbatch_size):
         self.optimizer.zero_grad(set_to_none=True)
 
-        batch_size, seq_len, hidden_dim = batch.shape
+        # ``batch`` is 3D ``[B, S, D]`` for standard residual models and 4D
+        # ``[B, S, hc_mult, D]`` for Hyper-Connection models (DeepSeek-V4-Flash).
+        # Only ``batch.shape[0]`` is actually used here.
+        batch_size = batch.shape[0]
         accumulation_steps = max(1, batch_size // microbatch_size)
 
         total_loss = 0.0
@@ -313,7 +316,8 @@ class QuantizationTrainer:
         return weights
 
     def validation_step(self, batch, temperature, scale, microbatch_size):
-        batch_size, seq_len, hidden_dim = batch.shape
+        # See note in ``train_step`` — only ``batch.shape[0]`` is needed.
+        batch_size = batch.shape[0]
         microbatch_size = max(1, microbatch_size)
         accumulation_steps = max(1, batch_size // microbatch_size)
 

@@ -131,6 +131,12 @@ class DeepseekV4Wrapper(Qwen3MoeWrapper):
         self.decoder_sparse_step = getattr(text_cfg, "decoder_sparse_step", 1)
         self.mlp_only_layers = list(getattr(text_cfg, "mlp_only_layers", []))
 
+        # Manifold-Constrained Hyper-Connection (mHC) multiplicity. The hidden
+        # state through every DeepseekV4DecoderLayer is shaped
+        # ``[B, S, hc_mult, D]``, mixed in/out by ``attn_hc`` / ``ffn_hc``.
+        # See ``modular_deepseek_v4.py`` lines 765-841 (paper §2.2).
+        self.hc_mult = int(getattr(text_cfg, "hc_mult", 1))
+
         # Detect the actual layers module (DeepSeek-V4-Flash places ``layers``
         # at the top level, matching ckpt keys ``layers.X...``).
         if hasattr(self.model, "layers") and hasattr(self.model.layers, "__len__"):

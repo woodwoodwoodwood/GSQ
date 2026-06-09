@@ -209,7 +209,16 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
         return self._fused_expert_forward_batched(
             xin, eids, quantized_weights=quantized_weights, gpts_calib=gpts_calib)
 
-    def run_expert_parallel(self, mlp_input_batch, quantized_weights=None, gpts_calib=None, input_ids=None):
+    def run_expert_parallel(self, mlp_input_batch, quantized_weights=None, gpts_calib=None, input_ids=None, skip_residual=False):
+        """Distributed MoE forward.
+
+        ``skip_residual=False`` (default): returns ``MoE_out + shared_out + mlp_input_batch``.
+        Standard Pre-LN residual; ``mlp_input_batch`` is the post-attention residual.
+
+        ``skip_residual=True``: returns ``MoE_out + shared_out`` only. Used by
+        Hyper-Connection models (DeepSeek-V4-Flash) where the residual is
+        combined externally via the ``ffn_hc`` mapping.
+        """
         pg = dist.group.WORLD
 
         x_flat, hidden, send_idx_flat, in_split_sizes, out_split_sizes, xin, win, eids, B, T, H = \
@@ -232,7 +241,30 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
                 shared_out = shared_out[0]
             y = y + shared_out.view(B, T, H).to(y.dtype)
 
+        if skip_residual:
+            return y
         return y + mlp_input_batch
+
+    @torch.no_grad()
+    def _gptq_calib_step(self, layer, x, additional_layer_inputs, batch_input_ids, gpts):
+        """One step of GPTQ Hessian accumulation on this layer.
+
+        Default Pre-LN block forward used by Qwen3-MoE / DeepSeek-V3 etc.:
+        ``x = x + attn(LN(x))`` then dispatch through MoE so the hooked
+        per-expert linears accumulate ``H = X^T X``. Subclasses with a
+        non-Pre-LN residual (e.g. DeepSeek-V4-Flash with mHC Hyper-Connection
+        residuals) override this to build the correct MoE input distribution.
+        """
+        hidden_states = layer.input_layernorm(x)
+        attn_out, _ = layer.self_attn(hidden_states, **additional_layer_inputs)
+        x = x + attn_out
+
+        _ = self.run_expert_parallel(
+            x,
+            quantized_weights=None,
+            gpts_calib=gpts,
+            input_ids=batch_input_ids,
+        )
 
     def calculate_mse(self, mlp_input_batch, quantized_weights, self_attn=False, validation=False, accumulation_steps=1, input_ids=None):
         if not self._is_moe_layer(self.current_layer_idx):
@@ -415,10 +447,6 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
                 for k, v in self.kwargs.items():
                     additional_layer_inputs[k] = v
 
-                hidden_states = layer.input_layernorm(x)
-                attn_out, _ = layer.self_attn(hidden_states, **additional_layer_inputs)
-                x = x + attn_out
-
                 # Real input_ids for hash-routed MoE (DeepSeek-V4-Flash). Falls
                 # back to ``arange`` dummies when the dataset pipeline did not
                 # populate ``input_ids`` (older runs / non-hash routers).
@@ -427,11 +455,12 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
                 else:
                     batch_input_ids = None
 
-                _ = self.run_expert_parallel(
-                    x,
-                    quantized_weights=None,
-                    gpts_calib=gpts,
-                    input_ids=batch_input_ids,
+                self._gptq_calib_step(
+                    layer=layer,
+                    x=x,
+                    additional_layer_inputs=additional_layer_inputs,
+                    batch_input_ids=batch_input_ids,
+                    gpts=gpts,
                 )
                 if rank == 0 and (j + 1) % calib_report_interval == 0:
                     report_gptq_calib(j + 1, n_hessian, time.time() - calib_start)

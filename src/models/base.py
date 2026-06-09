@@ -159,6 +159,15 @@ class BaseModelWrapper(ABC):
         self.fused_experts = False
         self.fused_expert_intermediate_size = None
 
+        # Hyper-Connection (mHC) multiplicity. For models like DeepSeek-V4-Flash
+        # the hidden state through every decoder block is shaped
+        # ``[B, S, hc_mult, D]`` instead of ``[B, S, D]``; the per-layer residual
+        # is mixed via two ``DeepseekV4HyperConnection`` modules (paper §2.2).
+        # ``hc_mult > 1`` triggers HC-aware activation storage in
+        # ``main.create_dict`` and HC-aware forward in the wrapper subclass.
+        # Default 1 = standard Pre-LN residual (no HC).
+        self.hc_mult = 1
+
         # When ``True``, ``_set_tensors`` will pair ``...experts.{e}.w{1,2,3}.weight``
         # (uint8 packed E2M1 nibbles) with ``..scale`` (uint8 UE8M0 block
         # scales) and dequantize on-the-fly to ``self.dtype`` before writing
@@ -682,6 +691,20 @@ class BaseModelWrapper(ABC):
                     f"positional_tensor_shapes={got_shapes}, kwarg_keys={list(kwargs.keys())}"
                 )
 
+            # HC models (e.g. DeepSeek-V4-Flash) wrap the hidden state in
+            # ``hc_mult`` parallel residual streams: at layer 0 entry the 4D
+            # state is ``embed.unsqueeze(2).expand(-1, -1, hc_mult, -1)`` (all
+            # streams identical). The capture target buffer is allocated as 4D
+            # in ``main.create_dict``. Match the dims by expanding the captured
+            # 3D fallback embed up to 4D when needed.
+            if expected_dim == 4 and hidden_states.dim() == 3:
+                hc_mult_target = data_dict['input'].shape[-2]
+                hidden_states = (
+                    hidden_states.unsqueeze(2)
+                    .expand(-1, -1, hc_mult_target, -1)
+                    .contiguous()
+                )
+
             batch_n = min(hidden_states.shape[0], end - start)
             data_dict['input'][start:start + batch_n] = hidden_states[:batch_n].to(data_dict['input'].dtype).cpu()
 
@@ -730,6 +753,18 @@ class BaseModelWrapper(ABC):
                 pos_emb[0][0].unsqueeze(0),
                 pos_emb[1][0].unsqueeze(0),
             )
+        elif isinstance(pos_emb, dict):
+            # DeepSeek-V4-Flash: ``position_embeddings`` is
+            # ``{"main": (cos, sin), "compress": (cos, sin)}``. Keep the dict
+            # structure but slice each ``(cos, sin)`` to the first sample so
+            # downstream calib batches (batch=1) get a matching shape.
+            sliced = {}
+            for k, v in pos_emb.items():
+                if isinstance(v, (tuple, list)) and len(v) >= 2 and torch.is_tensor(v[0]):
+                    sliced[k] = (v[0][0].unsqueeze(0), v[1][0].unsqueeze(0))
+                else:
+                    sliced[k] = v
+            self.kwargs["position_embeddings"] = sliced
 
     def _build_layer_inputs(self, batch_size):
         """Build kwargs dict for a layer forward, expanding attention_mask to batch_size."""
