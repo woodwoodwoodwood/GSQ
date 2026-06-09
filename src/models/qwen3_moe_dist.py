@@ -314,7 +314,16 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
 
         total_mse = self.loss_fn(out_q, out_fp)
         if not validation:
-            (total_mse / accumulation_steps).backward()
+            # When dead0 is large on this layer, some calib batches route 100%
+            # of tokens to experts owned by other ranks, leaving this rank with
+            # ``xin.shape[0] == 0``.  ``loss_fn(empty, empty)`` then produces a
+            # tensor that does not depend on any quantized weight (no grad_fn),
+            # and ``backward()`` raises ``element 0 of tensors does not require
+            # grad and does not have a grad_fn``.  In that case we skip the
+            # backward — this rank simply contributes zero to the gradient for
+            # this micro-batch, which is correct.
+            if total_mse.requires_grad and total_mse.grad_fn is not None:
+                (total_mse / accumulation_steps).backward()
 
         return total_mse.item()
 
