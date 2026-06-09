@@ -9,6 +9,8 @@ from ``DeepseekV4Wrapper``.
 
 from __future__ import annotations
 
+import os
+
 import torch
 import torch.distributed as dist
 
@@ -406,6 +408,15 @@ class DeepseekV4DistributedWrapper(DeepseekV4Wrapper, Qwen3MoeDistributedWrapper
         Build the correct 3D MoE input via attn site + ffn_hc, then dispatch
         through ``run_expert_parallel`` with ``gpts_calib=gpts`` so the per-
         expert linears see the production-time activation distribution.
+
+        ``GSQ_CALIB_ROUND_ROBIN`` (default ``"1"``): when truthy, bypass the
+        production TopKRouter during calib and use a deterministic round-
+        robin token→expert schedule so all 256 experts receive Hessian
+        samples. DSv4 layer 0-2 use HashRouter (``input_ids``-driven) which
+        already covers all experts; layer 3+ use TopKRouter where the
+        learned ``gate.weight`` projection consistently starves ~150 of 256
+        experts on any reasonable English calib distribution. GSQ training
+        and inference always use the real router and are unaffected.
         """
         # Attn site: 4D → 4D
         x = self._attn_site_forward(layer, x, additional_layer_inputs)
@@ -417,11 +428,13 @@ class DeepseekV4DistributedWrapper(DeepseekV4Wrapper, Qwen3MoeDistributedWrapper
         if self._is_moe_layer(self.current_layer_idx):
             post, comb, collapsed = self._ffn_collapse(layer, x)
             del post, comb  # only need collapsed for Hessian
+            force_rr = os.environ.get("GSQ_CALIB_ROUND_ROBIN", "1").strip().lower() in ("1", "true", "yes")
             _ = self.run_expert_parallel(
                 collapsed,
                 quantized_weights=None,
                 gpts_calib=gpts,
                 input_ids=batch_input_ids,
                 skip_residual=True,
+                force_round_robin=force_rr,
             )
         # Dense MLP layers: nothing to calibrate via expert parallel.

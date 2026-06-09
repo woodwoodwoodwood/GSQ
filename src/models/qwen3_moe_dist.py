@@ -120,7 +120,7 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
         # falls back to ``arange`` dummies for non-hash routers.
         return super()._router_topk(router, flat_hidden, input_ids=input_ids)
 
-    def _dispatch_tokens(self, mlp_input_batch, input_ids=None):
+    def _dispatch_tokens(self, mlp_input_batch, input_ids=None, force_round_robin=False):
         """Route tokens to expert-owning ranks via all-to-all.
 
         ``input_ids`` (optional): real (B, T) vocab token ids; required by hash
@@ -128,6 +128,14 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
         expert selection. Falls back to ``arange`` dummies when None — that
         fallback collapses every batch onto the same ~64 experts and starves
         the rest of GPTQ calibration data.
+
+        ``force_round_robin`` (default False): bypass the real router and
+        deterministically assign each token to ``top_k`` experts using a
+        rotating-modulo schedule, so every expert receives roughly
+        ``B*T*top_k / num_experts`` tokens per batch. Used only by GPTQ
+        Hessian accumulation when the production router would starve a large
+        fraction of experts of calibration data — GSQ training and inference
+        always go through the real router and are unaffected.
         """
         layer = self.get_layer_module(self.current_layer_idx)
         device = self.device
@@ -138,7 +146,43 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
         x_flat = hidden.reshape(B * T, H)
 
         router = self._moe_block(layer).gate
-        topw, topi, top_k = self._router_topk(router, hidden.reshape(-1, H), input_ids=input_ids)
+        if force_round_robin:
+            # Resolve top_k from the router (DSv4 stores ``top_k`` directly;
+            # other models may use ``num_experts_per_tok``).
+            top_k = (
+                getattr(router, "top_k", None)
+                or getattr(router, "num_experts_per_tok", None)
+                or 6
+            )
+            num_experts = self.num_experts
+            N = B * T
+            # token i -> experts [(i*top_k + j + step_off) % num_experts for j in 0..top_k]
+            # ``step_off`` rotates per call so different calib batches cover
+            # different (token, expert) pairs, improving Hessian diversity.
+            if not hasattr(self, "_rr_step_off"):
+                self._rr_step_off = 0
+                if self.rank == 0:
+                    print(
+                        f"[GPTQ-CALIB] round-robin enabled: top_k={top_k}, "
+                        f"num_experts={num_experts}; bypassing real router for "
+                        f"Hessian accumulation only (GSQ training/inference unaffected)",
+                        flush=True,
+                    )
+            base = (
+                torch.arange(N * top_k, device=device, dtype=torch.long)
+                + self._rr_step_off
+            )
+            self._rr_step_off = (self._rr_step_off + N * top_k) % num_experts
+            topi = (base % num_experts).view(N, top_k)
+            # Hessian accumulation only depends on the *input* x_flat per
+            # expert, not on the gating weights. Use uniform 1/top_k so the
+            # downstream forward output stays sane for any unrelated paths.
+            topw = torch.full(
+                (N, top_k), 1.0 / float(top_k),
+                device=device, dtype=self.dtype,
+            )
+        else:
+            topw, topi, top_k = self._router_topk(router, hidden.reshape(-1, H), input_ids=input_ids)
 
         tok_idx_flat = torch.arange(B * T, device=device, dtype=torch.long).repeat_interleave(top_k)
         eid_flat = topi.reshape(-1).to(torch.long)
@@ -209,7 +253,7 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
         return self._fused_expert_forward_batched(
             xin, eids, quantized_weights=quantized_weights, gpts_calib=gpts_calib)
 
-    def run_expert_parallel(self, mlp_input_batch, quantized_weights=None, gpts_calib=None, input_ids=None, skip_residual=False):
+    def run_expert_parallel(self, mlp_input_batch, quantized_weights=None, gpts_calib=None, input_ids=None, skip_residual=False, force_round_robin=False):
         """Distributed MoE forward.
 
         ``skip_residual=False`` (default): returns ``MoE_out + shared_out + mlp_input_batch``.
@@ -218,11 +262,15 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
         ``skip_residual=True``: returns ``MoE_out + shared_out`` only. Used by
         Hyper-Connection models (DeepSeek-V4-Flash) where the residual is
         combined externally via the ``ffn_hc`` mapping.
+
+        ``force_round_robin=True``: bypass the real router and use a rotating
+        round-robin assignment so all experts receive calibration data. See
+        ``_dispatch_tokens`` for details. Only used during GPTQ calib.
         """
         pg = dist.group.WORLD
 
         x_flat, hidden, send_idx_flat, in_split_sizes, out_split_sizes, xin, win, eids, B, T, H = \
-            self._dispatch_tokens(mlp_input_batch, input_ids=input_ids)
+            self._dispatch_tokens(mlp_input_batch, input_ids=input_ids, force_round_robin=force_round_robin)
 
         out_local = self._batched_expert_forward(xin, eids, quantized_weights, gpts_calib=gpts_calib)
         xin = out_local * win
@@ -254,16 +302,24 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
         per-expert linears accumulate ``H = X^T X``. Subclasses with a
         non-Pre-LN residual (e.g. DeepSeek-V4-Flash with mHC Hyper-Connection
         residuals) override this to build the correct MoE input distribution.
+
+        ``GSQ_CALIB_ROUND_ROBIN`` (default ``"1"``): when truthy, bypass the
+        production router during calib and use a deterministic round-robin
+        token→expert schedule so every expert receives Hessian samples. GSQ
+        training and inference always use the real router; only calib is
+        affected.
         """
         hidden_states = layer.input_layernorm(x)
         attn_out, _ = layer.self_attn(hidden_states, **additional_layer_inputs)
         x = x + attn_out
 
+        force_rr = os.environ.get("GSQ_CALIB_ROUND_ROBIN", "1").strip().lower() in ("1", "true", "yes")
         _ = self.run_expert_parallel(
             x,
             quantized_weights=None,
             gpts_calib=gpts,
             input_ids=batch_input_ids,
+            force_round_robin=force_rr,
         )
 
     def calculate_mse(self, mlp_input_batch, quantized_weights, self_attn=False, validation=False, accumulation_steps=1, input_ids=None):
