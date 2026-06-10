@@ -250,3 +250,14 @@ WANDB_MODE=offline GSQ_ROUTE_DEBUG=0 CUDA_VISIBLE_DEVICES=4,5,6,7 \
     /usr/local/app/GSQ/main.py \
     --config /usr/local/app/GSQ/configs/deepseek_v4/deepseek_v4_flash_2bit.yaml
 
+# 1. main.py -> GPTQ + GSQ quantization training
+# 2. save_quantized_model.py -> save quantized model
+/usr/local/app/GSQ/.venv/bin/python save_model.py \
+    --config configs/deepseek_v4/deepseek_v4_flash_2bit.yaml \
+    --run-id 20260609-181157_fcc6b7
+# 3. convert_to_humming.py -> convert to humming
+/usr/local/app/GSQ/.venv/bin/python convert_to_humming.py \
+    --in-dir /usr/local/app/GSQ/checkpoints/deepseek-v4-flash-2bit/20260609-181157_fcc6b7/assembled \
+    --out-dir /data1/models/deepseek-v4-flash-2bit-humming \
+    --symmetric \
+    --target-dtype bfloat16

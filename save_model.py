@@ -290,8 +290,31 @@ def main():
         if bk in base_entries and bk not in quantized_entries:
             del base_entries[bk]
             dropped += 1
-    if dropped:
-        print(f"  Dropping {dropped} base float weights replaced by packed-quantized versions")
+
+    # DeepSeek-V4-Flash stores expert weights as fused tensors
+    # ``*.mlp.experts.gate_up_proj`` / ``*.mlp.experts.down_proj`` (all 256
+    # experts packed into one tensor).  The quantized counterparts are per-expert
+    # ``*.mlp.experts.<E>.gate_proj.weight_packed`` etc., which share the
+    # same ``model.layers.<N>`` prefix but do not match the ``{prefix}.weight``
+    # lookup above.  Drop the fused BF16 base tensors for every layer that has
+    # quantized replacements so the assembled checkpoint keeps only the
+    # compressed versions.
+    quantized_layer_set = {
+        e["layer_idx"]
+        for e in quantized_entries.values()
+        if e["layer_idx"] is not None
+    }
+    fused_dropped = 0
+    for layer_idx in quantized_layer_set:
+        for fused_name in (
+            f"model.layers.{layer_idx}.mlp.experts.gate_up_proj",
+            f"model.layers.{layer_idx}.mlp.experts.down_proj",
+        ):
+            if fused_name in base_entries:
+                del base_entries[fused_name]
+                fused_dropped += 1
+    if dropped or fused_dropped:
+        print(f"  Dropping {dropped} base .weight + {fused_dropped} base fused-expert tensors replaced by packed-quantized versions")
 
     merged = {**base_entries, **quantized_entries}
     all_entries = list(merged.values())
