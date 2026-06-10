@@ -24,7 +24,7 @@ model:
 
 data:
   dataset_name: "c4"
-  batch_size: 96
+  batch_size: 128
   num_samples: 1024
   max_length: 1024
   num_workers: 8
@@ -44,7 +44,7 @@ quantization:
   logits_dtype: "bfloat16"
 
 training:
-  num_epochs: 5
+  num_epochs: 10
   device_microbatch_size: 4
   lr1: 0.0002
   lr2: 0.0001
