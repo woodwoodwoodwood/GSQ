@@ -18,7 +18,7 @@
 #                                           forward, maps ckpt→model prefixes)
 
 model:
-  name: "/data1/models/DeepSeek-V4-Flash-27723"
+  name: "/data1/models/DeepSeek-V4-Flash"
   device: "cuda"
   dtype: "bfloat16"
 

@@ -241,3 +241,12 @@ NCCL_BLOCKING_WAIT=1 \
   --master_port=29517 \
   /usr/local/app/GSQ/main.py \
   --config /usr/local/app/GSQ/configs/deepseek_v4/deepseek_v4_flash_2bit.yaml
+
+WANDB_MODE=offline GSQ_ROUTE_DEBUG=0 CUDA_VISIBLE_DEVICES=4,5,6,7 \
+  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PYTHONUNBUFFERED=1 \
+  NCCL_DEBUG=WARN TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
+  /usr/local/app/GSQ/.venv/bin/torchrun \
+    --nproc_per_node=4 --master_addr=127.0.0.1 --master_port=29517 \
+    /usr/local/app/GSQ/main.py \
+    --config /usr/local/app/GSQ/configs/deepseek_v4/deepseek_v4_flash_2bit.yaml
+
