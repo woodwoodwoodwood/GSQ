@@ -57,7 +57,7 @@ def collect_base_model_entries(base_model_dir):
         path = os.path.join(base_model_dir, fname)
         with safe_open(path, framework="pt", device="cpu") as f:
             for k in f.keys():
-                m = re.search(r"\.layers\.(\d+)\.", k)
+                m = re.search(r"(?:^|\.)layers\.(\d+)\.", k)
                 layer_idx = int(m.group(1)) if m else None
                 t = f.get_tensor(k)
                 entries[k] = {
@@ -306,8 +306,20 @@ def main():
     }
     fused_dropped = 0
     for layer_idx in quantized_layer_set:
+        # Drop per-expert FP8 base tensors (DeepSeek-V4-Flash official release):
+        # ``layers.N.ffn.experts.E.w1.weight`` etc.
+        # When any quantized expert exists for a layer, drop ALL base expert
+        # tensors for that layer so we don't double-store them.
+        base_expert_prefix = f"layers.{layer_idx}.ffn.experts."
+        base_expert_keys = [k for k in base_entries if k.startswith(base_expert_prefix)]
+        for k in base_expert_keys:
+            del base_entries[k]
+            fused_dropped += 1
+        # Also try fused-expert patterns (other model architectures)
         for fused_name in (
+            f"layers.{layer_idx}.mlp.experts.gate_up_proj",
             f"model.layers.{layer_idx}.mlp.experts.gate_up_proj",
+            f"layers.{layer_idx}.mlp.experts.down_proj",
             f"model.layers.{layer_idx}.mlp.experts.down_proj",
         ):
             if fused_name in base_entries:
