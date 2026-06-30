@@ -484,7 +484,24 @@ def get_model_wrapper(model_name, tokenizer, batch_size, seqlen, device, dtype, 
     if 'llama' in name_lower:
         from src.models.llama import LLaMAWrapper
         return LLaMAWrapper(model_name, tokenizer, batch_size, seqlen, device, dtype)
-    elif 'qwen3.5' in name_lower or 'qwen3.6' in name_lower:
+    elif 'qwen3.6' in name_lower or 'qwen3_6' in name_lower:
+        # Qwen3.6 is architecturally identical to Qwen3.5 (model_type qwen3_5_moe).
+        # Dedicated wrappers (Qwen36*) subclass the Qwen3.5 ones so future
+        # divergence has an override point; behavior is identical today.
+        from transformers import AutoConfig as _AC
+        _cfg = _AC.from_pretrained(model_name, trust_remote_code=True)
+        _tc = getattr(_cfg, 'text_config', _cfg)
+        _is_moe = hasattr(_tc, 'num_experts') or hasattr(_tc, 'num_local_experts')
+        if _is_moe and world_size > 1:
+            from src.models.qwen36_moe_dist import Qwen36MoeDistributedWrapper
+            return Qwen36MoeDistributedWrapper(model_name, tokenizer, batch_size, seqlen, device, dtype)
+        elif _is_moe:
+            from src.models.qwen36_moe import Qwen36MoeWrapper
+            return Qwen36MoeWrapper(model_name, tokenizer, batch_size, seqlen, device, dtype)
+        else:
+            from src.models.qwen36 import Qwen36Wrapper
+            return Qwen36Wrapper(model_name, tokenizer, batch_size, seqlen, device, dtype)
+    elif 'qwen3.5' in name_lower:
         from transformers import AutoConfig as _AC
         _cfg = _AC.from_pretrained(model_name, trust_remote_code=True)
         _tc = getattr(_cfg, 'text_config', _cfg)

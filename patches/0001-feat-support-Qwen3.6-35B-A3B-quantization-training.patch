@@ -1,0 +1,204 @@
+From 7a1c9e4d2f0b6c8a5e3d1f9b0a2c4d6e8f013579 Mon Sep 17 00:00:00 2001
+From: GSQ Maintainer <gsq@example.com>
+Date: Tue, 30 Jun 2026 16:46:00 +0800
+Subject: [PATCH] feat(models): support Qwen3.6-35B-A3B 2-bit quantization
+ training
+
+新增对 Qwen3.6-35B-A3B（MoE）的 GSQ 量化训练支持。
+
+经核对，Qwen3.6 与 Qwen3.5 共用同一架构与 model_type（qwen3_5_moe，
+architectures=Qwen3_5MoeForConditionalGeneration）：256 路由专家 + 1 共享专家、
+混合注意力（linear_attention/GatedDeltaNet + full_attention）、fused 3D 专家张量、
+多模态外壳（text_config + vision_config）。因此现有 Qwen35* wrapper 已天然适配，
+多卡走 Qwen35MoeDistributedWrapper 即可完成完整的专家并行量化。
+
+本次改动包含两部分：
+1. 新增配置 configs/qwen36/qwen36_35B_A3B.yaml：2-bit / GPTQ 初始化 / groupsize=128，
+   参数与 qwen35_35B_A3B.yaml 对齐，并在头部记录架构与 vLLM TP 约束。
+2. 加固 main.get_model_wrapper 的 Qwen3 家族路由：合并 qwen3 / qwen3.5 / qwen3.6
+   分支，改为以 config 的 model_type 为权威依据来区分 Qwen3.5/3.6 与 Qwen3，
+   名称匹配作为兜底，避免本地权重目录被改名（不含 "qwen3.6" 字样）时误路由到
+   Qwen3MoeWrapper 导致训练失败。
+
+---
+ configs/qwen36/qwen36_35B_A3B.yaml | 90 ++++++++++++++++++++++++++++++++
+ main.py                            | 67 ++++++++++++++++--------
+ 2 files changed, 129 insertions(+), 28 deletions(-)
+ create mode 100644 configs/qwen36/qwen36_35B_A3B.yaml
+
+diff --git a/configs/qwen36/qwen36_35B_A3B.yaml b/configs/qwen36/qwen36_35B_A3B.yaml
+new file mode 100644
+index 0000000..b3d5f72
+--- /dev/null
++++ b/configs/qwen36/qwen36_35B_A3B.yaml
+@@ -0,0 +1,90 @@
++# Production config — Qwen3.6-35B-A3B (MoE)
++# Uses paths relative to the working directory; set GSQ_RUNTIME in .env/shell if artifacts should leave the repo (see scripts/_common.sh).
++#
++# Model: Qwen/Qwen3.6-35B-A3B  (model_type: qwen3_5_moe)
++#   IMPORTANT: Qwen3.6 reuses the SAME architecture / model_type as Qwen3.5
++#   (qwen3_5_moe, arch Qwen3_5MoeForConditionalGeneration), so it is served by
++#   the existing Qwen35* wrappers (src/models/qwen35_moe_dist.py for the
++#   multi-GPU expert-parallel path). Confirmed via the public config.json:
++#   - 256 routed experts, 8 active per token (+ 1 shared expert)
++#   - 40 decoder layers, hidden_size=2048
++#   - Hybrid attention: layer_types — 30x "linear_attention" (GatedDeltaNet)
++#     + 10x "full_attention" (every 4th layer; full_attention_interval=4)
++#   - Shared expert per layer: shared_expert + shared_expert_gate (sigmoid gated)
++#   - Expert weights: 3D fused tensors gate_up_proj[E, 2*I, H] / down_proj[E, H, I]
++#   - moe_intermediate_size=512, shared_expert_intermediate_size=512
++#   - Multimodal shell: top-level config has text_config + vision_config; GSQ
++#     builds the text CausalLM from text_config and bridges the checkpoint's
++#     ".language_model.*" keys via BaseModelWrapper._ckpt_to_model_name.
++#
++# NOTE: Requires transformers >= 5.3.0 for Qwen3.5/3.6 MoE (qwen3_5_moe) support.
++#
++# Multi-GPU expert-parallel routing (main.get_model_wrapper):
++#   world_size > 1  -> Qwen35MoeDistributedWrapper  (recommended; full MoE expert quant)
++#   world_size == 1 -> Qwen35MoeWrapper             (single-GPU MoE expert quant is
++#                                                    incomplete; use the _dist path)
++#
++# Scaling guidance (4 GPUs/node):
++#   1 node  ( 4 GPUs) — 64 experts/GPU
++#   2 nodes ( 8 GPUs) — 32 experts/GPU
++#   4 nodes (16 GPUs) — 16 experts/GPU
++#
++# Serving (vLLM) TP constraint for Marlin WNA16 fused MoE with groupsize=128:
++#   (moe_intermediate_size / TP) % max(64, group_size) == 0  ->  (512 / TP) % 128 == 0
++#   => valid TP_SIZE in {1, 2, 4} (max 4). scripts/serve_model.sh auto-clamps TP.
++
++model:
++  name: "Qwen/Qwen3.6-35B-A3B"
++  device: "cuda"
++  dtype: "bfloat16"
++
++data:
++  dataset_name: "open_thoughts"
++  batch_size: 64
++  num_samples: 4096
++  max_length: 4096
++  num_workers: 8
++  val_samples: 128
++
++quantization:
++  gsq_bits: 2
++  init_method: "gptq"
++  gsq_enabled: true
++  start_layer: 0
++  self_attn: false
++  std: 0.01
++  temperature: [2, 0.05]
++  scale: [100, 500]
++  groupsize: 128
++  strength: 6
++  logits_dtype: "bfloat16"   # "float32" for higher precision logits (more memory)
++
++training:
++  num_epochs: 10
++  device_microbatch_size: 4
++  masks_lr: 0.0002
++  signs_lr: 0.0001
++  scales_lr: 0.0001
++  weight_decay: 1.0
++  checkpoint_dir: "checkpoints/qwen36-35b"
++  log_dir: "logs/qwen36-35b"
++  act_cache_dir: "cache/act_cache"
++  eval_baseline: true
++  # ppl_eval_every_n_layers: 6
++
++gptq:
++  nsamples: 512
++  wbits: 2
++  sym: true
++  trits: false
++  percdamp: 0.1
++  blocksize: 128
++  groupsize: 128
++  static_groups: false
++  prunen: 0
++  prunem: 0
++
++wandb:
++  enabled: false
++  entity: "ist"
++  project: "GSQ-multi"
+diff --git a/main.py b/main.py
+index 1a2b3c4..5d6e7f8 100644
+--- a/main.py
++++ b/main.py
+@@ -484,34 +484,45 @@ def get_model_wrapper(model_name, tokenizer, batch_size, seqlen, device, dtype, world_size, dummy=False):
+     if 'llama' in name_lower:
+         from src.models.llama import LLaMAWrapper
+         return LLaMAWrapper(model_name, tokenizer, batch_size, seqlen, device, dtype)
+-    elif 'qwen3.5' in name_lower or 'qwen3.6' in name_lower:
+-        from transformers import AutoConfig as _AC
+-        _cfg = _AC.from_pretrained(model_name, trust_remote_code=True)
+-        _tc = getattr(_cfg, 'text_config', _cfg)
+-        _is_moe = hasattr(_tc, 'num_experts') or hasattr(_tc, 'num_local_experts')
+-        if _is_moe and world_size > 1:
+-            from src.models.qwen35_moe_dist import Qwen35MoeDistributedWrapper
+-            return Qwen35MoeDistributedWrapper(model_name, tokenizer, batch_size, seqlen, device, dtype)
+-        elif _is_moe:
+-            from src.models.qwen35_moe import Qwen35MoeWrapper
+-            return Qwen35MoeWrapper(model_name, tokenizer, batch_size, seqlen, device, dtype)
+-        else:
+-            from src.models.qwen35 import Qwen35Wrapper
+-            return Qwen35Wrapper(model_name, tokenizer, batch_size, seqlen, device, dtype)
+-    elif 'qwen3' in name_lower:
+-        from transformers import AutoConfig as _AC
+-        _cfg = _AC.from_pretrained(model_name, trust_remote_code=True)
+-        _tc = getattr(_cfg, 'text_config', _cfg)
+-        _is_moe = hasattr(_tc, 'num_experts') or hasattr(_tc, 'num_local_experts')
+-        if _is_moe and world_size > 1:
+-            from src.models.qwen3_moe_dist import Qwen3MoeDistributedWrapper
+-            return Qwen3MoeDistributedWrapper(model_name, tokenizer, batch_size, seqlen, device, dtype)
+-        elif _is_moe:
+-            from src.models.qwen3_moe import Qwen3MoeWrapper
+-            return Qwen3MoeWrapper(model_name, tokenizer, batch_size, seqlen, device, dtype)
+-        else:
+-            from src.models.qwen3 import Qwen3Wrapper
+-            return Qwen3Wrapper(model_name, tokenizer, batch_size, seqlen, device, dtype)
++    elif 'qwen3' in name_lower:
++        # Unified Qwen3-family entry. We disambiguate by the model's actual
++        # ``model_type`` (authoritative) and fall back to the name string so a
++        # locally-renamed checkpoint directory still routes correctly.
++        #
++        #   - Qwen3 / Qwen3-MoE  -> model_type: qwen3 / qwen3_moe
++        #   - Qwen3.5 / Qwen3.6  -> model_type: qwen3_5_moe (SAME architecture:
++        #     gated-delta-net hybrid attention + shared_expert + fused 3D experts
++        #     + multimodal text_config nesting) -> served by Qwen35* wrappers.
++        from transformers import AutoConfig as _AC
++        _cfg = _AC.from_pretrained(model_name, trust_remote_code=True)
++        _tc = getattr(_cfg, 'text_config', _cfg)
++        _mt = str(getattr(_tc, 'model_type', '') or getattr(_cfg, 'model_type', '')).lower()
++        _is_moe = hasattr(_tc, 'num_experts') or hasattr(_tc, 'num_local_experts')
++        _is_qwen35 = (
++            'qwen3_5' in _mt
++            or 'qwen3.5' in name_lower or 'qwen3_5' in name_lower
++            or 'qwen3.6' in name_lower or 'qwen3_6' in name_lower
++        )
++        if _is_qwen35:
++            if _is_moe and world_size > 1:
++                from src.models.qwen35_moe_dist import Qwen35MoeDistributedWrapper
++                return Qwen35MoeDistributedWrapper(model_name, tokenizer, batch_size, seqlen, device, dtype)
++            elif _is_moe:
++                from src.models.qwen35_moe import Qwen35MoeWrapper
++                return Qwen35MoeWrapper(model_name, tokenizer, batch_size, seqlen, device, dtype)
++            else:
++                from src.models.qwen35 import Qwen35Wrapper
++                return Qwen35Wrapper(model_name, tokenizer, batch_size, seqlen, device, dtype)
++        else:
++            if _is_moe and world_size > 1:
++                from src.models.qwen3_moe_dist import Qwen3MoeDistributedWrapper
++                return Qwen3MoeDistributedWrapper(model_name, tokenizer, batch_size, seqlen, device, dtype)
++            elif _is_moe:
++                from src.models.qwen3_moe import Qwen3MoeWrapper
++                return Qwen3MoeWrapper(model_name, tokenizer, batch_size, seqlen, device, dtype)
++            else:
++                from src.models.qwen3 import Qwen3Wrapper
++                return Qwen3Wrapper(model_name, tokenizer, batch_size, seqlen, device, dtype)
+     elif ('k2.5' in name_lower or 'k2_5' in name_lower) and world_size > 1:
+         from src.models.kimi_k25_dist import KimiK25DistributedWrapper
+         return KimiK25DistributedWrapper(model_name, tokenizer, batch_size, seqlen, device, dtype, dummy=dummy)
+-- 
+2.43.0
