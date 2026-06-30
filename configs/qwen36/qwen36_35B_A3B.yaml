@@ -29,7 +29,7 @@
 #     logs/qwen36-35b/                ← Python training logs
 
 model:
-  name: "Qwen/Qwen3.6-35B-A3B"
+  name: "/data1/models/Qwen3.6-35B-A3B"
   device: "cuda"
   dtype: "bfloat16"
 
@@ -57,9 +57,8 @@ quantization:
 training:
   num_epochs: 10
   device_microbatch_size: 4
-  masks_lr: 0.0002
-  signs_lr: 0.0001
-  scales_lr: 0.0001
+  lr1: 0.0002          # logit params (masks/signs) learning rate
+  lr2: 0.0001          # scales learning rate
   weight_decay: 1.0
   checkpoint_dir: "checkpoints/qwen36-35b"
   log_dir: "logs/qwen36-35b"
