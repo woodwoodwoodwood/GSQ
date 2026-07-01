@@ -651,10 +651,10 @@ class Qwen35MoeDistributedWrapper(Qwen35MoeWrapper):
                     "weight_shape": tensors[f"{base}.weight_shape"]
                 }
 
-                W_deq = self.compressor.decompress_weight(
+                W_deq = self.compressor.decompress(
                     compressed_data,
-                    self.quantization_config.config_groups.group_0.weights
-                )
+                    self.quantization_config.config_groups.group_0,
+                )["weight"]
 
                 set_module_tensor_to_device(
                     self.model,
@@ -686,10 +686,10 @@ class Qwen35MoeDistributedWrapper(Qwen35MoeWrapper):
                     "weight_shape": tensors[f"{key_base}.weight_shape"]
                 }
 
-                return self.compressor.decompress_weight(
+                return self.compressor.decompress(
                     compressed_data,
-                    self.quantization_config.config_groups.group_0.weights,
-                )
+                    self.quantization_config.config_groups.group_0,
+                )["weight"]
 
             if plain_key in tensors:
                 return tensors[plain_key]
