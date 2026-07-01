@@ -336,3 +336,7 @@ nsys profile \
     --host 127.0.0.1 --port 8900 --max-model-len 4096 \
     --gpu-memory-utilization 0.85 --tokenizer-mode hf --max-num-seqs 128 \
     --generation-config vllm
+
+CUDA_VISIBLE_DEVICES=4,5 NPROC=2 \
+  CONFIG_FILE=configs/qwen36/qwen36_35B_A3B.yaml \
+  RESUME=latest bash scripts/run.sh

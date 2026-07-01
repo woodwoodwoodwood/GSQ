@@ -55,7 +55,7 @@ quantization:
   logits_dtype: "bfloat16"   # "float32" for higher precision logits (more memory)
 
 training:
-  num_epochs: 5
+  num_epochs: 1
   device_microbatch_size: 16
   lr1: 0.0002          # logit params (masks/signs) learning rate
   lr2: 0.0001          # scales learning rate
