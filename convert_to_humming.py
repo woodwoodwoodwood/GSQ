@@ -285,9 +285,30 @@ def write_humming_checkpoint(
     cfg_full = json.loads((in_dir / "config.json").read_text())
     old_qc = cfg_full["quantization_config"]
     ignore = old_qc.get("ignore", [])
-    # vLLM humming uses substring matching for ignore, not regex.
-    # Strip the "re:" prefix that compressed-tensors uses.
-    ignore = [entry[3:] if entry.startswith("re:") else entry for entry in ignore]
+    # vLLM humming's is_layer_skipped uses plain SUBSTRING matching
+    # (`module_name in prefix`), NOT regex. compressed-tensors, however, writes
+    # ignore entries as regexes like "re:.*self_attn.*" / "re:.*\.norm$".
+    # Simply stripping the "re:" prefix (as an earlier version did) leaves the
+    # regex metacharacters (".*", "\\.", "$") in place, so e.g. ".*self_attn.*"
+    # is NOT a substring of "model.layers.0.self_attn.q_proj" and the ignore
+    # SILENTLY MISSES: those un-ignored Linears then fall through the per-expert
+    # dynamic map, get treated as quantized, fail to find packed weights, and
+    # the load hangs. Convert each regex ignore into a bare substring by
+    # stripping the "re:" prefix and removing regex metacharacters, keeping the
+    # informative core token (e.g. "self_attn", "visual", "embed_tokens").
+    def _to_substring(entry: str) -> str:
+        s = entry[3:] if entry.startswith("re:") else entry
+        # Drop leading/trailing wildcards and anchors, unescape "\.".
+        s = s.strip()
+        s = re.sub(r"^\.\*", "", s)
+        s = re.sub(r"\.\*$", "", s)
+        s = s.lstrip("^").rstrip("$")
+        s = s.replace("\\.", ".")
+        # A remaining leading "." (from patterns like "re:.*\.norm$" -> ".norm")
+        # is intentional and kept: ".norm" is a valid substring of "...model.norm".
+        return s
+
+    ignore = [_to_substring(entry) for entry in ignore]
 
     # Build a `dynamic` map: regex -> per-layer humming config. Use the layer
     # prefix as an exact-match regex (escaped). The HummingLayer.from_safetensors

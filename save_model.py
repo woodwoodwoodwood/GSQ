@@ -137,8 +137,17 @@ def _build_ignore_list(model_config):
     model_type = model_config.get("model_type", "")
 
     if "vision_config" in model_config or "vision_tower" in model_type:
+        # Multimodal shells expose the vision stack under several different
+        # prefixes depending on the model family:
+        #   - LLaVA-style:            *.vision_tower.*, *.mm_projector.*
+        #   - Qwen-VL / Qwen3.x-VL:   *.visual.*  (e.g. model.visual.blocks.N...)
+        # The humming/compressed-tensors loader uses substring matching on the
+        # ignore list, so add every prefix we might encounter. Missing the
+        # actual prefix leaves vision Linears un-ignored, which then fall
+        # through the per-expert dynamic map and get mishandled at load time.
         ignore.append("re:.*vision_tower.*")
         ignore.append("re:.*mm_projector.*")
+        ignore.append("re:.*visual.*")
 
     merged = {**model_config, **text_config}
 
