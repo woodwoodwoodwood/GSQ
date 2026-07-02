@@ -162,6 +162,36 @@ def _build_ignore_list(model_config):
     return ignore
 
 
+def infer_pack_num_bits(gsq_bits):
+    """Map the training-config ``gsq_bits`` to the CT container ``num_bits``.
+
+    Must stay in sync with ``BaseModelWrapper._infer_pack_num_bits`` in
+    ``src/models/base.py``: that method decides the bit width used to *pack*
+    the on-disk ``weight_packed`` tensors, so the ``num_bits`` we inject into
+    config.json (and that convert_to_humming.py reads back as ``storage_bits``)
+    must match it exactly. A mismatch silently mis-unpacks the weights.
+    """
+    if gsq_bits is None:
+        return 4
+    if isinstance(gsq_bits, bool):
+        return 4
+    if isinstance(gsq_bits, int):
+        return max(1, gsq_bits)
+    if isinstance(gsq_bits, float):
+        return max(1, int(round(gsq_bits)))
+    if isinstance(gsq_bits, str):
+        tag = gsq_bits.strip().lower()
+        if tag in ("ternary", "1.58", "1_58"):
+            return 2
+        if tag == "nvfp4":
+            return 4
+        try:
+            return max(1, int(round(float(tag))))
+        except ValueError:
+            return 4
+    return 4
+
+
 def inject_quantization_config(out_dir, groupsize, wbits=4, num_layers=None, quantized_layer_indices=None):
     """Add compressed-tensors quantization_config to config.json.
 
@@ -315,16 +345,22 @@ def main():
         for k in base_expert_keys:
             del base_entries[k]
             fused_dropped += 1
-        # Also try fused-expert patterns (other model architectures)
-        for fused_name in (
-            f"layers.{layer_idx}.mlp.experts.gate_up_proj",
-            f"model.layers.{layer_idx}.mlp.experts.gate_up_proj",
-            f"layers.{layer_idx}.mlp.experts.down_proj",
-            f"model.layers.{layer_idx}.mlp.experts.down_proj",
-        ):
-            if fused_name in base_entries:
-                del base_entries[fused_name]
-                fused_dropped += 1
+        # Also drop fused-expert BF16 tensors (Qwen3.5/3.6 and similar), which
+        # store all experts of a layer in one 3D tensor:
+        #     <prefix>.layers.<N>.mlp.experts.gate_up_proj  [E, 2I, H]
+        #     <prefix>.layers.<N>.mlp.experts.down_proj     [E, H, I]
+        # The <prefix> varies by model: "", "model.", or (multimodal shells like
+        # Qwen3.6) "model.language_model.". Match on structure rather than a
+        # hardcoded prefix list, and require that ``gate_up_proj``/``down_proj``
+        # sit *directly* under ``.mlp.experts.`` (i.e. no ``.<expert_id>.`` in
+        # between) so per-expert tensors are never touched here.
+        fused_re = re.compile(
+            rf"(?:^|\.)layers\.{layer_idx}\.mlp\.experts\.(gate_up_proj|down_proj)$"
+        )
+        fused_keys = [k for k in base_entries if fused_re.search(k)]
+        for k in fused_keys:
+            del base_entries[k]
+            fused_dropped += 1
     if dropped or fused_dropped:
         print(f"  Dropping {dropped} base .weight + {fused_dropped} base fused-expert tensors replaced by packed-quantized versions")
 
@@ -393,16 +429,20 @@ def main():
         print(f"  {fname}")
 
     groupsize = cfg.quantization.groupsize
+    gsq_bits = getattr(cfg.quantization, "gsq_bits", None)
+    wbits = infer_pack_num_bits(gsq_bits)
     quantized_layer_indices = sorted({
         e["layer_idx"] for e in quantized_entries.values() if e["layer_idx"] is not None
     })
-    print(f"\nInjecting quantization_config into config.json (group_size={groupsize})...")
+    print(f"\nInjecting quantization_config into config.json "
+          f"(group_size={groupsize}, num_bits={wbits})...")
     if quantized_layer_indices and len(quantized_layer_indices) < num_layers:
         missing = sorted(set(range(num_layers)) - set(quantized_layer_indices))
         print(f"  Partial run detected: {len(quantized_layer_indices)}/{num_layers} layers quantized; "
               f"adding {len(missing)} unquantized layers to ignore list")
     inject_quantization_config(
         out_dir, groupsize,
+        wbits=wbits,
         num_layers=num_layers,
         quantized_layer_indices=quantized_layer_indices,
     )
