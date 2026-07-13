@@ -34,7 +34,7 @@ model:
   dtype: "bfloat16"
 
 data:
-  dataset_name: "open_thoughts"
+  dataset_name: "marvis_mixed"
   batch_size: 64
   num_samples: 4096
   max_length: 4096
@@ -55,7 +55,7 @@ quantization:
   logits_dtype: "float32"   # "float32" for higher precision logits (more memory)
 
 training:
-  num_epochs: 10
+  num_epochs: 5
   device_microbatch_size: 4
   lr1: 0.0002          # logit params (masks/signs) learning rate
   lr2: 0.0001          # scales learning rate
