@@ -8,7 +8,8 @@ CUDA_VISIBLE_DEVICES=7 /usr/local/app/GSQ/.venv/bin/vllm serve /data1/models/Qwe
     --max-model-len 4096 \
     --gpu-memory-utilization 0.90 \
     --max-num-seqs 32 \
-    --generation-config vllm
+    --generation-config vllm \
+    --no-enable-prefix-caching
 
 CUDA_VISIBLE_DEVICES=7 /usr/local/app/GSQ/.venv/bin/vllm serve /data1/models/Qwen3-30B-A3B-GPTQ-Int4 \
   --trust-remote-code \
@@ -65,6 +66,18 @@ REQUEST_RATE_LIST="inf" \
 bash /usr/local/app/GSQ/scripts/run_concurrency_sweep_simple.sh \
   --model /data1/models/Qwen3-30B-A3B-GPTQ-Int4
 
+for L in 8192 16384 25600 30720 35840 46080 76800 102400; do
+  echo "===== context = $L ====="
+  python3 benchmark_throughput.py --host localhost --port 8080 --backend openai-chat \
+    --tokenizer_path /data1/models/Qwen3-30B-A3B-Instruct-2507-gsq-2bit-humming \
+    --model_type qwen --mode sync \
+    --repeat_to_tokens $L \
+    --max_new_tokens 128 --ignore_eos \
+    --prompt_num 1 \
+    --request_rate inf --stream --quiet \
+    --perf_csv longctx_${L}.csv
+done
+
 
 
 # 测试数据集
@@ -108,7 +121,7 @@ env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
   curl -s --noproxy '*' http://127.0.0.1:8900/v1/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "/data1/models/Qwen3-30B-A3B-Instruct-2507-gsq-2bit-humming",
+    "model": "/data1/models/qwen36-35b-a3b-2bit-humming",
     "prompt": "你好，请介绍一下你自己",
     "max_tokens": 50,
     "temperature": 0
@@ -126,6 +139,17 @@ env -u http_proxy -u https_proxy curl -s --noproxy '*' http://127.0.0.1:8900/v1/
     "repetition_penalty": 1.05
   }'
 
+env -u http_proxy -u https_proxy curl -s http://127.0.0.1:8900/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model":"/data1/models/qwen36-35b-a3b-2bit-humming/",
+    "messages":[{"role":"user","content":"你好，介绍一下量子物理"}],
+    "max_tokens":512,
+    "chat_template_kwargs":{"enable_thinking":false}
+  }' \
+  | python -c "import sys,json; print(json.load(sys.stdin)['choices'][0]['message']['content'])"
+
+
 
 # 测试数据集
 export HF_ALLOW_CODE_EVAL=1
@@ -142,7 +166,7 @@ export HF_ALLOW_CODE_EVAL=1
 export HF_ALLOW_CODE_EVAL=1
 /usr/local/app/GSQ/.venv/bin/python -m lm_eval \
   --model local-completions \
-  --tasks hellaswag,leaderboard_gpqa_main,arc_challenge,arc_easy,gsm8k,piqa,winogrande \
+  --tasks hellaswag,leaderboard_gpqa_main,arc_challenge,arc_easy,gsm8k,piqa,winogrande,mmlu \
   --model_args model=/data1/models/DeepSeek-V4-Flash,base_url=http://127.0.0.1:8900/v1/completions,num_concurrent=8,tokenizer=/data1/models/DeepSeek-V4-Flash \
   --gen_kwargs temperature=0,seed=42 \
   --output_path /data1/models/DeepSeek-V4-Flash/evals \
@@ -160,8 +184,8 @@ CUDA_VISIBLE_DEVICES=7 FLASHINFER_DISABLE_VERSION_CHECK=1 /usr/local/app/GSQ/.ve
   --tensor-parallel-size 1 \
   --host 127.0.0.1 \
   --port 8900 \
-  --max-model-len 4096 \
-  --gpu-memory-utilization 0.85 \
+  --max-model-len 8192 \
+  --gpu-memory-utilization 0.9 \
   --tokenizer-mode hf \
   --max-num-seqs 32 \
   --generation-config vllm
@@ -283,6 +307,18 @@ WANDB_MODE=offline GSQ_ROUTE_DEBUG=0 CUDA_VISIBLE_DEVICES=4,5,6,7 \
     /usr/local/app/GSQ/main.py \
     --config /usr/local/app/GSQ/configs/deepseek_v4/deepseek_v4_flash_2bit.yaml
 
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+PYTHONUNBUFFERED=1 \
+NCCL_ASYNC_ERROR_HANDLING=1 \
+/usr/local/app/GSQ/.venv/bin/torchrun \
+  --nproc_per_node=4 \
+  --master_addr=127.0.0.1 \
+  --master_port=29517 \
+  /usr/local/app/GSQ/main.py \
+  --config /usr/local/app/GSQ/configs/qwen36/qwen36_35B_A3B.yaml
+
+
 # 1. main.py -> GPTQ + GSQ quantization training
 # 2. save_quantized_model.py -> save quantized model
 /usr/local/app/GSQ/.venv/bin/python save_model.py \
@@ -337,6 +373,102 @@ nsys profile \
     --gpu-memory-utilization 0.85 --tokenizer-mode hf --max-num-seqs 128 \
     --generation-config vllm
 
-CUDA_VISIBLE_DEVICES=4,5 NPROC=2 \
+# GPTQ + GSQ 量化训练
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 NPROC=8 \
   CONFIG_FILE=configs/qwen36/qwen36_35B_A3B.yaml \
   RESUME=latest bash scripts/run.sh
+
+# thinking 模型 eval
+/usr/local/app/GSQ/.venv/bin/python -m lm_eval \
+  --model local-completions \
+  --tasks hellaswag,leaderboard_gpqa_main,arc_challenge,arc_easy,gsm8k,piqa,winogrande,mmlu \
+  --model_args model=/data1/models/qwen36-35b-a3b-2bit-humming,base_url=http://127.0.0.1:8900/v1/completions,num_concurrent=8,tokenizer=/data1/models/qwen36-35b-a3b-2bit-humming,max_length=8192 \
+  --gen_kwargs 'temperature=0,seed=42,max_gen_toks=4096,until=<|im_end|>' \
+  --output_path /data1/models/qwen36-35b-a3b-2bit-humming/evals \
+  --log_samples --trust_remote_code --confirm_run_unsafe_code
+
+# qwen3.6 35B A3B 2bit humming 模型部署 + tool call
+CUDA_VISIBLE_DEVICES=5 VLLM_LOGGING_LEVEL=INFO FLASHINFER_DISABLE_VERSION_CHECK=1 /usr/local/app/GSQ/.venv/bin/vllm serve /data1/models/qwen36-35b-a3b-2bit-humming \
+  --trust-remote-code \
+  --quantization humming \
+  --tensor-parallel-size 1 \
+  --host 0.0.0.0 \
+  --port 8900 \
+  --max-model-len 256000 \
+  --gpu-memory-utilization 0.95 \
+  --tokenizer-mode hf \
+  --max-num-seqs 128 \
+  --generation-config vllm \
+  --enable-auto-tool-choice \
+  --tool-call-parser qwen3_xml \
+  --reasoning-parser qwen3
+
+sudo socat TCP-LISTEN:8080,fork,reuseaddr TCP:127.0.0.1:8900 & 
+
+claude --dangerously-skip-permissions
+
+# llamacpp 启动推理服务
+CUDA_VISIBLE_DEVICES=4 /usr/local/app/llama.cpp/build/bin/llama-cli   \
+  -m /data1/models/Qwen3.6-35B-A3B-IQ2_M-GGUF/qwen36-35b-a3b-IQ2_M.gguf   \
+  -c 8192 \
+  -n 4096 \
+  -t 8 \
+  -ngl 99 \
+  -p "请介绍一下你自己"
+
+CUDA_VISIBLE_DEVICES=4 /usr/local/app/llama.cpp/build/bin/llama-server \
+  -m /data1/models/Qwen3.6-35B-A3B-IQ2_M-GGUF/qwen36-35b-a3b-IQ2_M.gguf \
+  -c 81920 \
+  -t 8 \
+  -ngl 99 \
+  --port 8901 \
+  --host 0.0.0.0 \
+  -np 32 \
+  -cb
+
+CUDA_VISIBLE_DEVICES=4 python -m llama_cpp.server \
+  --model /data1/models/Qwen3.6-35B-A3B-IQ2_M-GGUF/qwen36-35b-a3b-IQ2_M.gguf \
+  --n_gpu_layers 99 \
+  --n_ctx 8192 \
+  --port 8901 \
+  --host 0.0.0.0
+
+# 评测 llamacpp 部署的模型
+export HF_ALLOW_CODE_EVAL=1
+/usr/local/app/GSQ/.venv/bin/python -m lm_eval \
+  --model local-completions \
+  --tasks hellaswag,leaderboard_gpqa_main \
+  --model_args model=/data1/models/Qwen3.6-35B-A3B-IQ2_M-GGUF,base_url=http://127.0.0.1:8901/v1/completions,num_concurrent=8,tokenizer=/data1/models/Qwen3.6-35B-A3B \
+  --gen_kwargs temperature=0,seed=42 \
+  --output_path /data1/models/Qwen3.6-35B-A3B-IQ2_M-GGUF/evals \
+  --log_samples \
+  --trust_remote_code \
+  --confirm_run_unsafe_code
+
+
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY
+export no_proxy="127.0.0.1,localhost"
+export NO_PROXY="127.0.0.1,localhost"
+export HF_ALLOW_CODE_EVAL=1
+/usr/local/app/GSQ/.venv/bin/python -m lm_eval \
+  --model gguf \
+  --tasks hellaswag,leaderboard_gpqa_main,arc_challenge,arc_easy,gsm8k,piqa,winogrande,mmlu \
+  --model_args base_url=http://127.0.0.1:8901,max_length=4096 \
+  --gen_kwargs temperature=0,seed=42 \
+  --output_path /data1/models/Qwen3.6-35B-A3B-IQ2_M-GGUF/evals \
+  --log_samples \
+  --trust_remote_code \
+  --confirm_run_unsafe_code
+
+/usr/local/app/GSQ/.venv/bin/python -m lm_eval \
+  --model local-completions \
+  --tasks gsm8k \
+  --model_args model=/data1/models/Qwen3.6-35B-A3B-IQ2_M-GGUF,base_url=http://127.0.0.1:8901/v1/completions,num_concurrent=8,tokenizer=/data1/models/Qwen3.6-35B-A3B \
+  --gen_kwargs temperature=0,seed=42 \
+  --output_path /data1/models/Qwen3.6-35B-A3B-IQ2_M-GGUF/evals \
+  --log_samples \
+  --trust_remote_code \
+  --confirm_run_unsafe_code
+
+# llama 框架性能测试
+CUDA_VISIBLE_DEVICES=5 ./build/bin/llama-bench -m /data1/models/qwen36-35b-a3b-gsq2.gguf -ngl 99 -p 512 -n 128

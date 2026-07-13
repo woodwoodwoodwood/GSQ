@@ -1,0 +1,1031 @@
+# ============================================================
+# Marvis Agent 框架默认配置
+# 此文件随版本更新覆盖，用户自定义配置请放在用户配置目录中
+# ============================================================
+
+# --- 框架基础配置 ---
+framework:
+  log_level: "INFO"                # 日志级别: DEBUG / INFO / WARNING / ERROR
+  log_stdout: false                # 是否同时输出到控制台
+  debug_http: false                # 是否启用 HTTP 调试（注入 debug 客户端）
+  memory_log_level: "INFO"        # 记忆模块专用日志级别: DEBUG / INFO / WARNING / ERROR
+
+# --- 执行引擎配置 ---
+execution:
+  tool_timeout_s: 600              # 普通工具执行超时（秒）
+  max_iterations: 25               # Agent 单次运行最大迭代次数（全局默认值，可被 Agent Profile 覆盖）
+  max_nesting_depth: 3             # 子 Agent 最大嵌套深度
+  scheduled_task_max_concurrent_runs: 3  # 定时任务最大同时运行数
+  scheduled_task_lease:
+    enabled: true                 # 是否启用定时任务云端租约
+    base_url: "https://yybadaccess.3g.qq.com"  # 租约接入层地址
+    acquire_path: "/v3/marvis_scheduled_task_lease_acquire"  # 获取租约路径
+    release_path: "/v3/marvis_scheduled_task_lease_release"  # 释放租约路径
+    timeout: 10                    # 租约接口请求超时（秒）
+    businessid: "marvis_client"    # 租约业务 ID（Ual-Access 鉴权用）
+    appid: "102033112"             # 租约应用 ID（Ual-Access 鉴权用）
+    accesskey: "fpzkeTlcGLVP37qiOWd29MyaOqaJYxMi"  # 租约访问密钥（MD5 签名用）
+    max_wait_seconds: 3600         # 最大等待租约时长，0 表示不限制
+    retry_after_min_seconds: 10    # 服务端建议重试间隔下限（秒）
+    retry_after_max_seconds: 60    # 服务端建议重试间隔上限（秒）
+    retry_jitter_seconds: 3        # 重试随机抖动上限（秒）
+
+# --- 模型注册表 ---
+# 从 V1 registries/models.yaml 完整迁移，provider 已按 V2 规范修正：
+#   - V1 的 provider: deepseek / venus 统一改为 provider: openai（OpenAI 兼容协议）
+#   - V1 的 provider: anthropic 保持不变
+#   - 未指定 provider 时默认为 openai
+#
+# 每个模型的配置结构由 LLMClientFactory 消费，此处不做内部校验
+# 必填字段: model（模型标识符）
+# 可选字段: provider / api_key / base_url / temperature / max_tokens / context_window_tokens /
+#           thinking / extra_body / default_headers / max_retries / timeout /
+#           strip_leading_whitespace / include_stream_usage / usage_merge_strategy
+#
+# 字段说明:
+#   provider: openai（默认）| anthropic
+#   context_window_tokens(必填): 模型上下文窗口大小（token 数），用于记忆模块判断上下文容量上限，快到上下文上限时触发压缩，默认 128000，如果不配置会导致压缩判断错误
+#   max_tokens(必填): 模型最大 输出token 数（用于记忆模块判断压缩时下一轮需要预留的上下文），默认 8000，如果不配置会导致压缩判断错误
+#   strip_leading_whitespace: 去除流式输出头部空白（默认 true）
+#   include_stream_usage: 流式请求中包含 usage 统计（默认 true）
+#   usage_merge_strategy: usage 合并策略 - latest（默认）| accumulate
+#   thinking: Anthropic thinking 参数（如 {type: adaptive, effort: high}）
+#   extra_body: 额外请求体参数（如 {thinking_enabled: true}）
+#   default_headers: 默认请求头
+#   max_retries: SDK 级别最大重试次数（默认 2）
+#   timeout: 请求超时配置，支持两种格式：
+#     - 简写（数字）: timeout: 600  → connect=10, read=600, write=600, pool=600
+#     - 完整（字典）: timeout: {connect: 10, read: 600, write: 600, pool: 600}
+#       connect: TCP 连接建立超时（默认 10 秒）
+#       read: chunk 间隔超时，流式场景下两个 chunk 之间的最大等待（默认 600 秒）
+#       write: 请求发送超时（默认 600 秒）
+#       pool: 连接池等待超时（默认 600 秒）
+#
+# 特殊条目:
+#   local_model: 本地模型连接参数模板
+#     LOCAL 模式下，当某个 Agent / 组件显式声明 allow_local_llm: true 时，
+#     此模板会在运行时用于覆盖目标模型的连接参数。
+#     覆盖字段：model / api_key / base_url / provider / temperature / extra_body
+#     保留字段：模型自身的 context_window_tokens / max_tokens 等不在模板中的字段
+#     ${LOCAL_LLM_PORT} 占位符在 AgentConfig.load() 中动态替换为实际端口
+#     决策位置（均默认 false）：
+#       - 主/子 Agent：prompts/agents/<name>/config.yaml 中 model.allow_local_llm
+#       - 记忆压缩模型：memory.llm.allow_local_llm
+#
+# api_key 说明:
+#   api_key 是业务标识符（非真正密钥），实际鉴权通过用户登录态完成。
+#   生产环境中整个配置文件通过 EncryptFsUtil 加密存储，运行时透明读取。
+models:
+  # 本地模型连接参数模板（非可直接选用的模型）
+  # 当 Agent / 组件显式开启 allow_local_llm 且 work_mode=LOCAL 时，
+  # 运行时用此模板覆盖目标模型的连接参数
+  local_model:
+    model: "/data1/models/qwen36-35b-a3b-2bit-humming"
+    api_key: "no-key"
+    base_url: "http://29.226.67.231:8080/v1"
+    provider: "openai"
+    # temperature 语义说明：
+    #   temperature: 0   → 显式使用 0（确定性输出）
+    #   temperature: null → 不传此参数，由 API 服务端默认值决定
+    temperature: 0
+    thinking: null                     # 显式清除 Anthropic thinking 参数
+
+  # 预热专用模型配置
+  # LOCAL 模式下预热时使用，max_tokens=1 仅触发 Prefill 而不生成大量输出。
+  # 连接参数在运行时由 local_model 模板覆盖（allow_local_llm=True），
+  # 此处仅需确保 model 字段非空（通过配置解析）和 max_tokens=1。
+  warmup_model:
+    model: "/data1/models/qwen36-35b-a3b-2bit-humming"
+    max_tokens: 1
+
+  default:
+    model: "/data1/models/qwen36-35b-a3b-2bit-humming"
+    api_key: "no-key"
+    base_url: "http://29.226.67.231:8080/v1"
+    provider: "openai"
+    temperature: 0.7
+    max_tokens: 16384
+    context_window_tokens: 256000
+
+  main-auto:
+    model: "/data1/models/qwen36-35b-a3b-2bit-humming"
+    api_key: "no-key"
+    base_url: "http://29.226.67.231:8080/v1"
+    provider: "openai"
+    temperature: 0.7
+    max_tokens: 16384
+    context_window_tokens: 256000
+
+  app-auto:
+    model: "/data1/models/qwen36-35b-a3b-2bit-humming"
+    api_key: "no-key"
+    base_url: "http://29.226.67.231:8080/v1"
+    provider: "openai"
+    temperature: 0.7
+    max_tokens: 16384
+    context_window_tokens: 256000
+
+  file-auto:
+    model: "/data1/models/qwen36-35b-a3b-2bit-humming"
+    api_key: "no-key"
+    base_url: "http://29.226.67.231:8080/v1"
+    provider: "openai"
+    temperature: 0.7
+    max_tokens: 16384
+    context_window_tokens: 256000
+
+  computer-auto:
+    model: "/data1/models/qwen36-35b-a3b-2bit-humming"
+    api_key: "no-key"
+    base_url: "http://29.226.67.231:8080/v1"
+    provider: "openai"
+    temperature: 0.7
+    max_tokens: 16384
+    context_window_tokens: 256000
+
+  browser-auto:
+    model: "/data1/models/qwen36-35b-a3b-2bit-humming"
+    api_key: "no-key"
+    base_url: "http://29.226.67.231:8080/v1"
+    provider: "openai"
+    temperature: 0.7
+    max_tokens: 16384
+    context_window_tokens: 256000
+
+  search-auto:
+    model: "/data1/models/qwen36-35b-a3b-2bit-humming"
+    api_key: "no-key"
+    base_url: "http://29.226.67.231:8080/v1"
+    provider: "openai"
+    temperature: 0.7
+    max_tokens: 16384
+    context_window_tokens: 256000
+
+  hy3-preview-agent:
+    model: "/data1/models/qwen36-35b-a3b-2bit-humming"
+    api_key: "no-key"
+    base_url: "http://29.226.67.231:8080/v1"
+    provider: "openai"
+    temperature: 0.7
+    max_tokens: 16384
+    context_window_tokens: 256000
+
+  ark_deepseek-v3-2-251201:
+    model: "/data1/models/qwen36-35b-a3b-2bit-humming"
+    api_key: "no-key"
+    base_url: "http://29.226.67.231:8080/v1"
+    provider: "openai"
+    temperature: 0.7
+    max_tokens: 16384
+    context_window_tokens: 256000
+
+  kimi-k2.5:
+    model: "/data1/models/qwen36-35b-a3b-2bit-humming"
+    api_key: "no-key"
+    base_url: "http://29.226.67.231:8080/v1"
+    provider: "openai"
+    temperature: 0.7
+    max_tokens: 16384
+    context_window_tokens: 256000
+
+  claude-sonnet-4-6:
+    provider: "openai"
+    model: "/data1/models/qwen36-35b-a3b-2bit-humming"
+    api_key: "no-key"
+    base_url: "http://29.226.67.231:8080/v1"
+    temperature: 0.7
+    max_tokens: 16384
+    context_window_tokens: 256000
+
+  claude-opus-4-6:
+    provider: "openai"
+    model: "/data1/models/qwen36-35b-a3b-2bit-humming"
+    api_key: "no-key"
+    base_url: "http://29.226.67.231:8080/v1"
+    temperature: 0.7
+    max_tokens: 16384
+    context_window_tokens: 256000
+
+  gpt-5.4:
+    model: "/data1/models/qwen36-35b-a3b-2bit-humming"
+    api_key: "no-key"
+    base_url: "http://29.226.67.231:8080/v1"
+    provider: "openai"
+    temperature: 0.7
+    max_tokens: 16384
+    context_window_tokens: 256000
+
+  claude-opus-4-6-thinking:
+    provider: "openai"
+    model: "/data1/models/qwen36-35b-a3b-2bit-humming"
+    api_key: "no-key"
+    base_url: "http://29.226.67.231:8080/v1"
+    max_tokens: 16384
+    thinking: null
+    temperature: 0.7
+    context_window_tokens: 256000
+
+  hunyuan-2.0-instruct-20251111:
+    model: "/data1/models/qwen36-35b-a3b-2bit-humming"
+    api_key: "no-key"
+    base_url: "http://29.226.67.231:8080/v1"
+    provider: "openai"
+    temperature: 0.7
+    max_tokens: 16384
+    context_window_tokens: 256000
+
+  # AI 生成物判定专用模型(ai_label_judge 服务消费)。
+  # 必须是 OpenAI 兼容 provider —— judge 强制使用 response_format=json_schema(strict)。
+  hy3-preview-agent-real:
+    model: "/data1/models/qwen36-35b-a3b-2bit-humming"
+    api_key: "no-key"
+    base_url: "http://29.226.67.231:8080/v1"
+    provider: "openai"
+    max_tokens: 16384
+    context_window_tokens: 256000
+
+  hunyuan-turbos-vision:
+    model: "/data1/models/qwen36-35b-a3b-2bit-humming"
+    api_key: "no-key"
+    base_url: "http://29.226.67.231:8080/v1"
+    provider: "openai"
+    max_tokens: 8192
+    context_window_tokens: 256000
+
+  venus-vision-llm:
+    model: "/data1/models/qwen36-35b-a3b-2bit-humming"
+    api_key: "no-key"
+    base_url: "http://29.226.67.231:8080/v1"
+    provider: "openai"
+    max_tokens: 8192
+    context_window_tokens: 256000
+
+  grounder-model:
+    model: "/data1/models/qwen36-35b-a3b-2bit-humming"
+    api_key: "no-key"
+    base_url: "http://29.226.67.231:8080/v1"
+    provider: "openai"
+    max_tokens: 8192
+    context_window_tokens: 256000
+
+  glm-5v-turbo-thinking:
+    model: "/data1/models/qwen36-35b-a3b-2bit-humming"
+    api_key: "no-key"
+    base_url: "http://29.226.67.231:8080/v1"
+    provider: "openai"
+    max_tokens: 8192
+    context_window_tokens: 256000
+
+# --- MCP 服务器配置 ---
+# 从 V1 registries/mcp_servers.yaml 完整迁移
+# 每个 MCP 服务器的配置结构由 MCPClientManager 消费
+# 注意: ${MARVIS_PATH} 等变量引用由 MCPClientManager 在使用时解析，
+#       AgentConfig 层不做环境变量替换
+#
+# 平台过滤: 每个条目【必须】通过 platforms 字段显式声明所属平台（显式白名单），规则如下:
+#   - 字段缺失 / 为 null / 为空列表 [] → 条目被丢弃（缺失时额外产生 warning 提示配置遗漏）
+#   - 非空列表 → 仅在列表内的系统加载（有效值: windows / linux / macos；大小写不敏感）
+# 示例:
+# mcp_servers:
+#   androws:
+#     platforms: [windows]              # 仅 Windows 加载
+#     command: "node"
+#     args: ["${MARVIS_PATH}/dist/index.js"]
+#   cross_platform_srv:
+#     platforms: [windows, linux, macos] # 需跨平台加载时必须显式列出全部三项
+#     command: "cross-srv"
+#
+# 【MCP 工具超时配置】
+# 优先级（由高到低）：
+#   1. tools.<清洗后名>.timeout                                用户逃生舱，最高优先级
+#   2. mcp_servers.<server>.tool_timeouts.<原始 tool.name>     工具级（正数才生效，非法值忽略并降级）
+#   3. mcp_servers.<server>.default_tool_timeout                server 级默认（工具调用）
+#   4. execution.tool_timeout_s                                 全局兜底
+#
+# 注意：`mcp_servers.<server>.timeout` 是 **Streamable HTTP 连接超时**（默认 3s），
+#      与本节内 `default_tool_timeout`（工具调用超时）是 **两个完全不同的字段**，不要混淆。
+#      两者通过 `tool_` 词根区分：`timeout` = 连接层，`default_tool_timeout` = 工具调用层。
+#
+# 非法值说明：tool_timeouts.<name> / default_tool_timeout 的值必须为正数（> 0）。
+#   null、0、负数、布尔值、字符串等均视为非法，启动时发出 warning 并降级到下一级。
+#   如需让某工具绕过 server 级 default_tool_timeout 直达全局兜底，请在 tools: 节
+#   显式配置 `tools.<清洗后名>.timeout`（优先级最高）。
+#
+# 注意：修改 default_tool_timeout / tool_timeouts 后需 reload 对应 server
+#      才能生效（ToolDefinition 在 supervisor 首次注册时烘焙）。
+#
+# 示例：
+#   default_tool_timeout: 120        # 该 server 所有工具默认调用超时（秒）
+#   tool_timeouts:                   # 仅对特定工具生效（key 为 MCP 原始 tool.name）
+#     specific_tool_name: 600
+#     another_tool: 30
+#
+# 【MCP 工具禁用配置（disabled_tools）】
+# 从该 MCP Server 暴露的工具列表中排除指定工具。被禁用的工具不会注册为
+# ToolDefinition，因此 LLM 将完全感知不到它们的存在，也无法被调用。
+# 适用于需要关闭某些危险/冗余 MCP 工具但又不希望修改 MCP Server 自身的场景。
+#
+# 取值规则：
+#   - 字符串列表（推荐）: disabled_tools: ["tool_a", "tool_b"]  # 禁用指定工具
+#   - 单个字符串:        disabled_tools: "dangerous_tool"       # 等效于单元素列表
+#   - 不配置 / 空列表 []: 不启用任何禁用规则
+#   - 其它类型（如 dict / bool）: 启动时 warning 并降级为空列表
+#
+# 注意：
+#   - disabled_tools 中的工具名使用 MCP Server 暴露的原始 tool.name（小写/大小写敏感
+#     取决于 MCP Server 自身），与 tool_timeouts、pass_auth 等字段的规则一致
+#   - 配置了但 Server 实际未暴露的工具名会在启动时产生 warning 提示，帮助排查
+#     拼写错误或工具名变更问题
+#   - 修改 disabled_tools 后需要 reload 对应 server 才能生效
+#
+# 示例：
+#   my_server:
+#     platforms: [windows]
+#     command: "my-server"
+#     disabled_tools:
+#       - dangerous_tool              # 禁用危险工具
+#       - redundant_tool              # 禁用冗余工具
+#
+# 【登录态透传配置（pass_auth）】
+# 控制是否将用户登录态（auth headers）通过 _meta 字段透传给 MCP Server 的工具调用。
+# 适用场景：MCP Server 需要代表用户访问需鉴权的后端服务时，开启此配置。
+#
+# 取值规则：
+#   - pass_auth: true                # 本 server 所有工具一律透传登录态
+#   - pass_auth: false               # 关闭透传（等同于不配置）
+#   - pass_auth: ["tool_a", "tool_b"] # 白名单模式，仅指定工具透传登录态
+#   - 不配置 / null / 空列表 []       # 关闭透传
+#   - 其它类型（如 dict）             # 非法值，启动时 warning 并降级为关闭
+#
+# 示例：
+#   my_server:
+#     platforms: [windows]
+#     command: "my-server"
+#     pass_auth: true                 # 所有工具透传
+#
+#   another_server:
+#     platforms: [windows]
+#     command: "another-server"
+#     pass_auth: ["search", "upload"] # 仅 search 和 upload 工具透传
+#
+# 【来源透传配置（pass_source）】
+# 控制是否将前端请求来源标识（来自 agent.run 请求 data.metadata.source，如 "web"/"plugin"/"cli"）
+# 通过 _meta.source 扁平字段透传给 MCP Server 的工具调用。
+# 适用场景：MCP Server 需要按调用方来源做埋点 / 权限 / 文案差异化时开启。
+#
+# 取值规则（语义与 pass_auth 完全一致）：
+#   - pass_source: true                  # 本 server 所有工具一律透传 source
+#   - pass_source: false                 # 关闭透传（等同于不配置）
+#   - pass_source: ["tool_a", "tool_b"]  # 白名单模式，仅指定工具透传 source
+#   - 不配置 / null / 空列表 []           # 关闭透传
+#   - 其它类型（如 dict）                 # 非法值，启动时 warning 并降级为关闭
+#
+# 语义细节：
+#   - 与 pass_auth 完全正交，可独立开关；同时开启时二者各自往 _meta 写入互不冲突
+#   - ctx.source 为空串时不注入（避免给下游塞空串脏值）
+#
+# 示例：
+#   my_server:
+#     platforms: [windows]
+#     command: "my-server"
+#     pass_source: true                  # 所有工具透传 source
+#
+#   another_server:
+#     platforms: [windows]
+#     command: "another-server"
+#     pass_source: ["search", "upload"]  # 仅 search 和 upload 工具透传 source
+#
+# 【cancel_response 广播开关（supports_cancel_response）】
+# 控制当用户主动取消一轮回复（agent.cancel）时，服务端是否向本 MCP server 广播
+# 约定的 cancel_response tool 调用，用于通知 server 按 response_id 维度回收在飞长任务。
+# 仅当 server 端**确实实现了** cancel_response tool 时才应开启，否则会默默产生大量
+# isError 噪声日志。
+#
+# 取值规则（严格布尔判定，与 pass_auth/pass_source 不同，**不**支持白名单）：
+#   - supports_cancel_response: true   # 本 server 进入 cancel_response 广播范围
+#   - supports_cancel_response: false  # 不进入广播范围（等同于不配置）
+#   - 不配置 / null / 任意非布尔 true 值   # 默认安全：不进入广播范围
+#
+# 语义细节：
+#   - cancel_response 广播仅在用户**主动** agent.cancel 时触发；断线宽限期超时不触发
+#   - 未声明的 server 完全不会收到 cancel_response 调用；server 端实现了但忘开启则完全不生效
+#   - 只有自研 MCP server（如 androws_mcp / yyb-toolkit）在实现 cancel_response tool 后才应开启；
+#     第三方 server 默认不开，需上游明确确认实现后才可显式启用
+#
+# 示例：
+#   androws_mcp:
+#     platforms: [windows]
+#     command: 'AndrowsMCP.exe'
+#     supports_cancel_response: true   # server 已实现 cancel_response，加入广播范围
+#
+#   third_party_server:
+#     platforms: [windows]
+#     command: 'third_party_server'
+#     # supports_cancel_response 未声明 → 不接收广播
+#
+# 【渐进披露配置（progressive_disclosure / description）】
+# 控制该 MCP Server 是否走"渐进披露"形态：开启后该 server 不再展开为
+# LLM tools schema 中的独立工具，而是进入 catalog（由 invoke_mcp_tool
+# 元工具按需路由），用于压缩 system prompt 中的工具列表体量。
+#
+# progressive_disclosure 取值规则：
+#   - true            进入 catalog；catalog 文案从同级 description 字段读取
+#   - false / 未声明  保持 direct 形态（默认），description 字段被忽略
+#   - 其它（非布尔）   启动期 warning 一次，按 false 处理
+#
+# description 字段（仅 progressive_disclosure: true 时生效）：
+#   - 必须以「摘要：」/「能力：」/「适用场景：」三段固定头依次开头，
+#     供 description_service 抽取 catalog 的 L1 / L2 / L3 渲染
+#   - 缺失或为空字符串：catalog 仅渲染 "摘要：<server_name>" 兜底
+#   - 段头缺失：对应 catalog 层级渲染为空（启动期 warning 提示）
+#
+# 示例：
+#   wintools:
+#     platforms: [windows]
+#     command: "mcp_server/win_use_mcp/WinUseMCP.exe"
+#     transportType: stdio
+#     progressive_disclosure: true
+#     description: |
+#       摘要：Windows 11/10 系统设置与运维助手，覆盖系统设置调整、硬件信息查询、
+#       系统管理工具入口与微软官方资料检索。
+#       能力：应用与默认程序、桌面个性化、显示参数、音量与声音、网络（WiFi/蓝牙/
+#       热点/远程桌面）、电源与电池、账户与隐私安全、磁盘清理、任务栏与虚拟桌面、
+#       硬件与进程信息、系统维护（更新/启动项）、无障碍辅助、微软官方文档深度搜索。
+#       适用场景：用户提出 Windows 使用、设置调整、故障排查、隐私安全、硬件状态、
+#       系统优化或微软官方资料检索类问题时使用。
+mcp_servers:
+  yyb-toolkit:
+    platforms: [windows]
+    command: "mcp_server/yyb_alg_mcp/YYBAndrowsUseMCP.exe"
+    args:
+      - "--executable"
+      - "${MARVIS_PATH}/AndrowsMCP.exe"
+      - "--action_path"
+      - "mcp_server/yyb_alg_mcp/workflow_app_use.zip"
+    env:
+      MODEL_BASE_URL: "https://yybadaccess.3g.qq.com/v1"
+      MODEL_API_KEY: "placeholder"
+    transportType: stdio
+    pass_auth: true
+    default_tool_timeout: 300
+
+  androws_mcp:
+    platforms: [windows]
+    command: "${MARVIS_PATH}/AndrowsMCP.exe"
+    cwd: "${MARVIS_PATH}"
+    transportType: stdio
+    confirm_handlers:
+      manage_app: "manage_app_uninstall"
+      install_update_yyb: "yyb_engine_install_update"
+    pass_auth: true
+    disabled_tools:
+      # 业务上很少使用，基本没被触发的
+      - "game_monitor_query"
+      - "app_resolution"
+      - "game_monitor_set"
+      - "adb_debug"
+      - "scroll_to_find"
+
+      # 已经被业务逻辑整合的
+      - "search_app"
+      - "exe_mouse_drag"
+      - "android_tap"
+      - "check_app_update"
+      - "check_app_permission"
+      - "is_app_installed"
+      - "query_apps"
+      - "swipe"
+      - "swipe_and_observe"
+      - "tap_back"
+      - "exe_press_key"
+      - "get_system_package"
+      - "dump_ui"
+      - "exe_input_text"
+      - "check_environment"
+      - "exe_capture_screen"
+      - "exe_mouse"
+      - "exe_get_mouse_pos"
+      - "exe_dump_ui"
+      - "get_app_info"
+      - "exe_list_shortcuts"
+      - "exe_open_shortcut"
+      - "capture_screen"
+      - "exe_capture_window"
+      - "exe_screen_size"   
+      - "exe_focus_at" 
+      - "input_text"
+      - "quick_launch_local_exe"
+      - "operate_system_app"
+      - "input_text_at"
+      - "focus_at"
+      - "mini_program_launch"
+      - "download_skill"
+      - "exe_action_pipeline"
+
+  MarvisMCP:
+    platforms: [windows]
+    command: "${MARVIS_PATH}/MarvisMCP.exe"
+    args:
+      - "--ai-launcher"
+    cwd: "${MARVIS_PATH}"
+    transportType: stdio
+    pass_source: true
+    pass_auth: true
+
+  # 自研 Windows 工具 MCP Server
+  # 暴露 ~20 个 Toolkit 级别的工具，内部做 query → 具体工具的精确匹配
+  wintools:
+    platforms: [windows]
+    command: "mcp_server/win_use_mcp/WinUseMCP.exe"
+    transportType: stdio
+    default_handler: "inject_tool_call_id"
+    pass_auth: true
+
+  mactools:
+    platforms: [macos]
+    command: "mcp_server/mac_use_mcp/MacUseMCP"
+    transportType: stdio
+    default_handler: "inject_tool_call_id"
+    pass_auth: true
+
+  mac_flow_mcp:
+    platforms: [macos]
+    command: "mcp_server/mac_flow_mcp/MacFlowMCP"
+    args:
+      - "--macdesktop_executable"
+      - "mcp_server/mac_desktop_mcp/MacDesktopMCP"
+    env:
+      MODEL_BASE_URL: "https://yybadaccess.3g.qq.com/v1"
+      MODEL_API_KEY: "placeholder"
+    transportType: stdio
+    pass_auth: true
+    confirm_handlers:
+      uninstall_apps: "manage_mac_app_uninstall"
+    default_tool_timeout: 300
+
+  mac_desktop_mcp:
+    platforms: [macos]
+    command: "mcp_server/mac_desktop_mcp/MacDesktopMCP"
+    args:
+      - "--business-id"
+      - "marvis_mcp"
+      - "--access-token"
+      - "RccVnLrYQb3SIJPncnuAZFB8wjwL3jYy"
+      - "--channel-id"
+      - "2100200128"
+    transportType: stdio
+    tool_handlers:
+      mac_capture_screen: "inject_image_path"
+      mac_capture_window: "inject_image_path"
+    pass_auth: true
+    confirm_handlers:
+      mac_uninstall_app: "manage_mac_app_uninstall"
+
+  MacMarvisMCP:
+    platforms: [macos]
+    command: "mcp_server/MarvisMCP/MarvisMCP"
+    args:
+      - "--ai-launcher"
+    transportType: stdio
+    pass_source: true
+    pass_auth: true
+
+  LinuxMarvisMCP:
+    platforms: [linux]
+    command: "mcp_server/linux_sendfile_mcp/MarvisMCP"
+    transportType: stdio
+    pass_source: true
+    pass_auth: true
+
+# --- 工具级配置 ---
+# 从 V1 registries/tools.yaml 迁移 + 扩展
+# 列表类型的配置项会完全替换默认值（不追加），请确保包含所有需要的项
+#
+# 【内置工具超时配置】
+# 优先级（由高到低）：
+#   1. tools.<工具名>.timeout            用户 yaml 显式配置，最高优先级
+#   2. ToolDefinition.timeout             工具代码声明（@tool(..., timeout=...)）
+#   3. execution.tool_timeout_s           全局兜底
+#
+# 注意：本链路不涉及 `tool_timeouts` / `default_tool_timeout`，后两者仅限 MCP 工具生效。
+# 该配置与 MCP 工具超时链路正交：若用户在 tools: 节为 MCP 工具的清洗后名写了
+# timeout，则作为最高优先级覆盖 MCP 侧的 tool_timeouts / default_tool_timeout。
+tools:
+  # 特殊工具的超时配置（V1 中硬编码的常量）
+  dispatch_task:
+    # 子 Agent 执行超时（秒）。这是子 Agent 执行的唯一超时控制点，
+    # 由 ToolExecutor 的 asyncio.wait_for 统一管理。
+    # 必须 ≥ 子 Agent 内部 ask_user 的最大等待时长（86400s）+ 缓冲时间，
+    # 否则子 Agent 中触发 ask_user 等待用户响应时，会被外层 dispatch_task
+    # 超时机制提前杀死，导致用户即便回复也无法生效。
+    # 默认 25h（90000s）= 24h ask_user + 1h 缓冲。
+    timeout: 90000
+    enabled: true
+  ask_user:
+    # 用户交互等待超时（ToolExecutor 外部超时）。
+    # ask_user 工具内部会按 `outer - 60s 安全间隔` 动态计算二级 wait_for 超时
+    # （见 ask_user_tool.py::_resolve_ask_user_timeout），确保内部超时先于
+    # ToolExecutor 外层 wait_for 触发，返回工具自定义的友好提示而非通用
+    # "Tool execution timeout" 错误。
+    # outer 超时由 ToolExecutor 统一计算后通过 ToolContext.effective_timeout
+    # 注入到工具内部，与 ``ToolConfig.get_effective_timeout`` 单一事实来源。
+    # 默认 24h（86400s），兼顾 ask_user 工具主动垂询与 confirm 参数确认两条路径。
+    timeout: 86400
+    enabled: true
+    # IM 渠道自由文本回复 → 标准化决策的解析器配置。
+    # 前端发 decision=pending + query=<用户原文> 时,后端调一次轻量 LLM
+    # 把自由文本规范化为 ConfirmHandler / ask_user observe 期望的结构。
+    # 安全策略:LLM 判 ambiguous 统一退化为 rejected,工具不执行。
+    free_text_resolver:
+      enabled: true
+      model: "hy3-preview-agent-real"          # 轻量模型即可
+      allow_local_llm: true
+      timeout: 120                             # 单次 LLM 调用上限(秒)
+      max_retries: 1                           # 失败重试次数(总尝试 = max_retries + 1)
+      max_query_chars: 500                     # 用户自由文本截断上限
+  ai_search:
+    model: "hunyuan-2.0-instruct-20251111"   # AI 通用深度搜索使用的模型
+    timeout: 120                             # AI 搜索超时（含 LLM 调用）
+    enabled: true
+    allow_local_llm: false                   # 是否允许 LOCAL 模式下使用本地模型
+  computer_search:
+    model: "hunyuan-2.0-instruct-20251111"   # Windows 专用搜索使用的模型
+    timeout: 120                             # Windows 专用搜索超时（含 LLM 调用）
+    enabled: true
+    allow_local_llm: false                   # 是否允许 LOCAL 模式下使用本地模型
+  update_user_persona:
+    model: "hy3-preview-agent-real"          # 人设生成使用的模型(OpenAI 兼容 provider，支持 strict json_schema)
+    # LOCAL(隐私模式)下,辅助 LLM 会读用户的称呼/风格描述等用户输入,
+    # 必须改走本地模型,否则隐私数据仍会出网。LLMClientFactory 仅在
+    # work_mode==LOCAL 且 allow_local_llm==true 时才用 local_model
+    # 模板覆盖,所以 CLOUD/HYBRID 下此开关不影响行为,仍走 hy3-preview-agent-real。
+    allow_local_llm: true                    # 是否允许 LOCAL 模式下使用本地模型
+    enabled: true
+  analyze_image:
+    model: "venus-vision-llm"           # 图像理解使用的视觉模型
+    allow_local_llm: true                    # 是否允许 LOCAL 模式下使用本地模型
+  gui_grounder:
+    model: "grounder-model"                  # GUI 定位使用的 VLM 模型
+    allow_local_llm: false                   # 是否允许 LOCAL 模式下使用本地模型
+  convert_file:
+    base_url: "https://yybadaccess.3g.qq.com"  # 文件转换服务接入层地址
+    timeout: 300                              # 文件转换接入层请求超时（秒）
+    businessid: "marvis_client"              # 文件转换业务 ID（Ual-Access 鉴权用）
+    appid: "102033112"                       # 文件转换应用 ID（Ual-Access 鉴权用）
+    accesskey: "fpzkeTlcGLVP37qiOWd29MyaOqaJYxMi"  # 文件转换访问密钥（MD5 签名用）
+    enabled: true
+  web_search:
+    base_url: "https://yybadaccess.3g.qq.com"  # 搜索服务接入层地址
+    timeout: 65                               # 网页搜索工具总超时（秒），内部 HTTP 请求会预留 5 秒用于工具收尾
+    businessid: "marvis_client"              # 搜索业务 ID（Ual-Access 鉴权用）
+    appid: "102033112"                       # 搜索应用 ID（Ual-Access 鉴权用）
+    accesskey: "fpzkeTlcGLVP37qiOWd29MyaOqaJYxMi"  # 搜索访问密钥（MD5 签名用）
+    default_engine: "auto"        # 默认搜索引擎标识（传递给接口的 engine 参数）
+    cache_ttl: 600                           # 搜索结果缓存过期时间（秒），0 表示禁用缓存
+    cache_maxsize: 200                       # 缓存最大条目数
+    enabled: true
+  web_fetch:
+    httpx_timeout: 15                        # httpx 快速抓取后端超时（秒），覆盖常见静态页面 / SSR 页面
+    playwright_timeout: 30                   # crawl4ai 浏览器抓取后端超时（秒），含 Edge 冷启动与页面渲染
+    max_retries: 1                           # 同后端内瞬时失败（超时 / 5xx / 429）的重试次数
+    max_content_length: 20000                 # 返回给 LLM 的正文最大字符数，超过则截断并附加标记
+    min_content_length: 20                   # 正文最小字符数，低于该阈值直接判定为空页
+    upgrade_min_content_length: 200          # 升级阈值：httpx 正文短于此长度则触发升级到 crawl4ai
+    upgrade_min_visible_text: 100            # JS-only 壳页判定阈值：<body> 非脚本可见文本短于此值才考虑升级
+    auto_upgrade: true                       # 是否启用 httpx → crawl4ai 自动升级；关闭后 backend=auto 等价于 backend=httpx
+    default_user_agent: >-                   # 默认桌面 User-Agent（主流 Edge），用户参数传入时优先使用用户值
+        Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
+        (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0
+    cache_ttl: 900                           # 结果缓存 TTL（秒），默认 15 分钟，0 表示禁用缓存
+    cache_maxsize: 100                       # 缓存最大条目数
+    cache_max_bytes: 52428800                # 缓存总字节数上限（默认 50MB = 50*1024*1024），防止大页面撑爆内存
+    allowed_schemes: [http, https]           # 允许的 URL scheme 白名单
+    browser_channel: "msedge"                # 浏览器 channel，复用系统 Edge 避免下载 Chromium
+    browser_headless: true                   # 是否无头运行
+    browser_viewport: [1920, 1080]           # 浏览器视口尺寸
+    pruning_threshold: 0.48                  # crawl4ai PruningContentFilter 阈值（0~1，越大越激进）
+    pruning_min_word_threshold: 10           # PruningContentFilter 最小词数阈值
+    enabled: true
+
+# --- Knowledgebase 服务配置（统一客户端） ---
+# 管理与 knowledgebase 进程的所有 HTTP 通信，包括搜索和发票等接口。
+# 端口获取优先级：
+# 1. KBPortResolver 动态读取 --kb_port_file 指定的端口文件（每次请求时延迟解析）
+# 2. 未指定 kb_port_file 或端口文件不可用时，回退到此处的 base_url 默认值
+# 注意：上层应用无需保证 knowledgebase 先于 MarvisAgent 启动，
+# 端口解析延迟到实际发起请求时执行，knowledgebase 就绪后自动恢复。
+knowledgebase:
+  base_url: "http://127.0.0.1:5151"
+  timeout: 10                        # 搜索接口超时（秒）
+  invoice_timeout: 300               # 发票接口超时（秒），OCR 耗时长需要更大超时
+
+# --- Cloud Asset 远程服务配置 ---
+# Token 计费和 AK/SK 管理的远程 API 配置。
+# 配置为空时 token 相关功能不可用。
+cloud_asset:
+  base_url: "https://yybadaccess.3g.qq.com"
+  timeout: 30
+  businessid: "marvis_client"               # Cloud Asset 业务 ID（Ual-Access 鉴权用）
+  appid: "102033112"                        # Cloud Asset 应用 ID（Ual-Access 鉴权用）
+  accesskey: "fpzkeTlcGLVP37qiOWd29MyaOqaJYxMi"  # Cloud Asset 访问密钥（MD5 签名用）
+
+# --- Persona Service 配置 ---
+# 用户人设领域服务：默认值兜底 / 本地 CRUD / 云端读写 / 锁 / 后台拉取节流 /
+# 用户切换关闭。详见 ai_agent.agent.persona.service.PersonaService。
+persona_service:
+  # 同一用户两次云端拉取的最小间隔（秒）；过频会打爆后端 QPS，过疏会延迟跨设备同步。
+  min_pull_interval_sec: 600.0
+  # system prompt 中 description 的最大字符数（中文按字符计数）。
+  max_description_summary_chars: 400
+
+# --- 客户端环境扩展信息配置 ---
+# 用于构造 LLM 请求头 Ual-Access-MarvisExt。
+# 本需求环境能力固定开启，配置仅保留必要业务参数。
+# Windows/macOS 会按 PC 客户端形态采集本机字段，Linux 只使用移动端透传字段。
+client_env:
+  beacon:
+    ioa_refresh_interval_s: 600          # IOA 状态刷新间隔，默认 10 分钟
+    ioa_check_timeout_s: 2               # 单次 IOA 检测等待超时，避免后台任务长期挂起
+  uskey:
+    busiid: "7800255"                    # 星迹协议要求的业务 ID
+
+# --- Eval Logger 配置 ---
+eval_logger:
+  enable: true                              # 总开关：是否启用评测日志（注册 Consumer）
+  file:
+    enable: false                            # 是否写本地 JSONL 文件
+    max_log_files: 100                      # 最大日志文件数
+    max_file_size: "2000MiB"                   # 单个日志文件最大大小
+  otel:
+    enable: true                            # 是否上报到云端
+    endpoint: "https://galileotelemetry.tencent.com/v1/logs"  # OTLP HTTP/Protobuf endpoint
+    # 多租户路由头（Galileo 必填，值需与 resource.telemetry.target 一致）
+    headers:
+      X-Galileo-Target: "Browser.marvis.eval"
+    # Resource Schema URL（Galileo OMP v3 必须指定，否则平台维度聚合可能异常）
+    schema_url: "https://gotp.woa.com/schemas/omp/v3.0.0"
+    timeout_s: 10
+    queue_size: 2048                         # 内存队列大小
+    schedule_delay_ms: 5000                  # 批量发送间隔（毫秒）
+    max_export_batch_size: 512               # 单次最大批量
+    export_timeout_ms: 30000                 # 单次 export 超时（毫秒）
+    resource:                                # 附加到所有 LogRecord 的 Resource attributes
+      # OTel 语义约定：服务名（缺失会被云端归到 unknown_service）
+      service.name: "marvis.agent"
+      # Galileo 平台路由主键，必须与 headers.X-Galileo-Target 完全一致
+      telemetry.target: "Browser.marvis.eval"
+      # Galileo 部署命名空间：Production / Development
+      deployment.namespace: "Production"
+      # Galileo 部署环境名：formal / test / 特性环境标识
+      deployment.environment.name: "formal"
+    max_body_bytes: 2097152                  # 单条 body 超过该字节数则退化为占位 JSON，事件不丢失（默认 2MiB，防御上限）
+    shutdown_timeout_ms: 3000                # 进程退出 flush 等待上限（毫秒）
+
+# --- AI 生成物判定服务(ai_agent.services.ai_label_judge) ---
+# 不是 LLM 可见的工具,而是 agent_loop 在 STREAM_AI_MESSAGE_COMPLETE /
+# STREAM_RETURN_DIRECT_RESULT 之后同步调用的产出物归属判定服务。
+# 必须是 OpenAI 兼容 provider —— 强制 response_format=json_schema(strict)。
+ai_label_judge:
+  model: "hy3-preview-agent-real"            # 产出物 AI 生成判定专用模型(CLOUD/HYBRID 模式生效)
+  # 判定会把完整对话历史摘要喂给 LLM,LOCAL(隐私模式)下必须改走本地模型,
+  # 否则隐私数据仍会出网。LLMClientFactory 仅在 work_mode==LOCAL 且
+  # allow_local_llm==true 时才用 local_model 模板覆盖,所以 CLOUD/HYBRID
+  # 下此开关不影响行为,仍走 hy3-preview-agent-real。
+  allow_local_llm: true
+
+# --- Workspace 配置 ---
+workspace:
+  auto_cleanup_days: 30            # Workspace 自动清理天数
+  min_retain: 30                   # 最少保留的 workspace 数量（无论是否过期）
+
+# --- 动态 MCP Server 管理（mcp.* action）---
+# 用户运行时通过 agent.action mcp.create / mcp.update / mcp.delete 等管理的 MCP Server,
+# 与 mcp_servers (静态 yaml) 互斥;按用户(openid)隔离,加密持久化在 Marvis SecKV
+# (marvis_seckv.dll / libmarvis_seckv.dylib)中。
+mcp_dynamic:
+  # 是否允许 stdio 类配置(等于宿主机任意 RCE 风险);默认关闭。
+  # 关闭时 mcp.create / mcp.update 含 'command' 字段的配置会被拒绝(stdio_disallowed)。
+  allow_stdio: false
+  # OAuth flow(浏览器等待用户授权)的总等待上限(秒)。
+  # 默认 600s = 10 分钟,覆盖大多数用户在浏览器实际完成授权的耗时。
+  # 回调路径固定为代码常量 ai_agent.mcp.oauth.OAUTH_CALLBACK_PATH(/oauth/mcp/callback),
+  # 不在配置中暴露(redirect_uri 须与授权服务器登记值完全一致,避免配置漂移)。
+  oauth_timeout_s: 600
+  # streamable-http transport 的握手 + initialize 合计超时(秒)。
+  # OAuth 场景下整个浏览器授权 flow 跑在第一条请求内部,所以这个值至少要
+  # 覆盖"用户在浏览器授权所需的最长时间"。**默认 600s = 10 分钟**。
+  # 对纯 PAT / no-auth 的 server 这个值并不影响实际握手时间(握手秒级完成)。
+  startup_timeout_s: 600
+  # mcp.create / update / enable 阶段同步等待 dynamic client READY 的
+  # 超时(秒)。**应 ≥ startup_timeout_s**;留空走 startup_timeout_s 同值。
+  handler_wait_ready_timeout_s: 600
+  # 动态客户端注册(DCR, RFC 7591)上送的品牌元数据。授权服务器的 consent
+  # 页面就靠这几个字段识别"是哪个产品在申请授权":缺省时部分服务器会回退
+  # 到 redirect_uri 的 host(loopback 的 127.0.0.1),显示成裸 IP 而非产品名。
+  # 这里统一声明,build_oauth_provider 在注册时填进 OAuthClientMetadata。
+  oauth_client:
+    # consent 页显示的产品名(OAuthClientMetadata.client_name)。
+    client_name: "Marvis"
+    # 产品主页(OAuthClientMetadata.client_uri);很多服务器会显示它的 host,
+    # 优先级高于 redirect_uri 的 host —— 这是把 127.0.0.1 换成品牌的关键。
+    # 必须是合法 https URL,留空则不上送该字段。
+    client_uri: "https://marvis.qq.com/"
+    # consent 页 logo(OAuthClientMetadata.logo_uri)。必须是合法 https URL,
+    # 留空则不上送。
+    logo_uri: "https://marvis.qq.com/favicon.ico"
+  # MCP 渐进披露：description 生成服务配置。
+  # 当 dynamic MCP server 缺少静态 description 时，按需调用 LLM 生成
+  # 该 server 的 catalog 文案；端侧带每日生成次数限制。
+  description_generation:
+    # description 生成模型别名：必须指向 models 注册表中已存在的别名。
+    # 使用轻量模型即可
+    model: "hy3-preview-agent-real"
+    # 端侧每日 LLM 生成次数限制。
+    daily_quota: 50
+
+# --- 记忆模块配置 ---
+# 路径类配置项为相对于 database_dir 的相对路径，运行时自动解析为绝对路径
+memory:
+  # 数据库配置
+  database:
+    sqlite_db_name: "memory.db"              # SQLite 数据库文件（相对于 database_dir）
+    vector_db_name: "memory_vector.db"       # 向量数据库文件（sqlite-vec，单文件 SQLite DB，相对于 database_dir）
+    tantivy_index_dir_name: "tantivy_index"  # Tantivy 倒排索引目录（相对于 database_dir）
+
+  # 向量嵌入配置
+  embedding:
+    vector_dim: 512                          # 向量维度（需与嵌入模型输出维度一致）
+    model: "bge-small-zh-v1.5"               # 调用 CloudAssetService.create_embeddings 时传入的模型名
+
+  # 压缩策略配置
+  compression:
+    # 模型上下文窗口 token 上限（fallback 值）
+    # 优先从 LLMClientFactory 获取压缩模型（llm.compress_model）的 max_tokens，
+    # 仅当 LLMClientFactory 不可用或模型配置中未指定 max_tokens 时使用此值
+    max_conversation_tokens: 128000
+    strategy:
+      token_quota_user: 5000                 # 预估用户输入 token 配额
+      token_quota_longterm_memory: 5000      # 预估长期记忆 token 配额
+      token_quota_response: 8000             # 预估响应 token 配额
+      # system prompt token 配额（保守估计值，覆盖 Windows + 多 skills 场景）
+      token_quota_system: 18000
+      token_limit_buffer_ratio: 0.05         # token 限制缓冲比例（与 buffer_size 取较小值）
+      token_limit_buffer_size: 5000          # token 限制缓冲大小
+      # 轮内压缩参数
+      intra_context_history_dominate_ratio: 0.5
+      intra_context_trajectory_substantial_threshold: 5
+      intra_context_trajectory_max_reserved_steps: 20
+      intra_context_trajectory_max_reserved_ratio: 0.2
+      # 轮间压缩参数
+      inter_context_history_max_reserved_rounds: 40
+      inter_context_history_max_reserved_ratio: 0.1
+      # 通用压缩参数
+      min_reserved_units: 0                    # 扩张后保留区域的最小单元数（步/轮），方向 3 改为 0 允许极端 case 全量压缩
+
+  # LLM 配置（指定记忆模块使用的模型名称，引用 models 注册表中的模型）
+  llm:
+    compress_model: "default"                # 压缩策略使用的模型名称
+    # 是否允许 LOCAL 模式下使用本地模型（models.local_model）覆盖 compress_model 的连接参数
+    # 默认 false：记忆压缩涉及用户对话内容，除非显式授权否则保持云端
+    allow_local_llm: false
+    # 记忆模块 LLM 调用追踪默认值（当调用方未传入 auth_context 时使用）
+    # 用于后端识别来自记忆模块的 LLM 请求，便于计费归因和调用链追踪
+    default_agent_name: "memory"             # 默认 Agent 名称标识
+    default_conversation_id: "memory-internal"  # 默认会话 ID
+    default_response_id: "memory-internal"   # 默认响应 ID
+
+  # 多模态存储配置
+  multimodal:
+    storage_dir_name: "multimodal"           # 多模态文件存储目录名（相对于 database_dir）
+
+  # 记忆管理配置
+  management:        # 记忆整理策略（noop / basic）
+    user_profile_enabled: true                # 画像开关：关闭后不再检索画像、不注入 system prompt
+    experience_rag_enabled: true              # 长期记忆 RAG 开关：关闭后不再触发经验记忆 RAG 检索
+    longterm_extract_strategy: "default"      # 长期记忆提取策略（noop / default）
+    profile_read_strategy: "default"          # 用户画像读取策略（default / noop）
+    entry_read_strategy: "default"            # 经验 RAG 读取策略（default / noop）
+    # 经验 RAG embedding 通道最小相似度阈值（归一化分数 = 1/(1+L2_distance)，范围 (0,1]）。
+    # 在 RRF 融合前对 embedding 桶过滤；0.0 关闭过滤；keyword(BM25) 通道不受影响。
+    entry_rag_min_embedding_score: 0.55
+    # 经验记忆 RAG 注入方式：
+    # - "tool_call"：以 assistant+tool 伪历史消息对形式注入（旧方案）
+    # - "append_to_user"：拼接到当前未结束轮的 user message content 末尾
+    #   （适用于弱 LLM 容易模仿 mock assistant 消息的场景）
+    experience_rag_inject_mode: "append_to_user"
+    longterm_consolidate_strategy: "default"  # 长期记忆整理策略（default / noop）
+    # 经验记忆治理触发阈值（秒）：距离上次经验记忆整理超过该时长才会触发新的一轮整理
+    # 默认 21600 秒（即 6 小时）
+    experience_consolidate_threshold_s: 86400
+    # 用户画像治理触发阈值（秒）：距离上次画像整理超过该时长才会触发新的一轮整理
+    # 默认 21600 秒（即 6 小时）
+    user_profile_consolidate_threshold_s: 86400
+    # 用户画像读取（路径 A）单次拉取的最大条数
+    # 由 LongtermManager.get_user_profile_str 消费，避免画像过长挤占 system prompt
+    user_profile_read_limit: 10
+    # 用户画像治理时单次拉取的最大条数
+    # 由 ConsolidationService._run_user_profile_consolidation 消费
+    user_profile_consolidate_limit: 200
+    # 长期记忆一次性清理：删除此时间戳（毫秒）之前的所有长期记忆数据
+    # 设为 0 则不执行清理
+    # 设为某个毫秒时间戳后，首次启动时自动清理该时间点之前的旧数据
+    # 修改此值后会重新触发清理（对比 KV 中已执行的时间戳）
+    longterm_purge_before_ms: 1779198011000
+    # 被动整理业务开关 + 阈值
+    passive_extract:
+      enabled: true
+      idle_threshold_sec: 300             # 会话闲置超过该阈值才会进入待整理集合
+      batch_limit: 50                     # 单次 _tick 处理会话上限
+    # dispatch_task 背景信息注入允许占用的 token 比例
+    # 计算方式：max_total_tokens = token_limit * background_token_ratio
+    # 用于限制 dispatch_task 注入的历史上下文体量，避免挤占子 Agent 自身预算
+    background_token_ratio: 0.5
+
+  # 后台调度器配置（每个继承自 PeriodicTask 的子任务一份独立配置）
+  # 新增子任务（如未来的"空闲会话整理"）只需在此追加一段同构配置即可
+  scheduler:
+    # 经验记忆治理调度器
+    consolidation:
+      interval_sec: 3600              # 后台循环轮询间隔（秒），默认 1 小时
+      run_first_immediately: true     # 启动后是否立即跑一次 tick
+      stop_timeout_sec: 3.0           # stop() 等待任务退出的最长秒数
+    # 被动整理调度器
+    passive_extract:
+      interval_sec: 300               # 后台扫描周期，默认 5 分钟
+      run_first_immediately: true
+      stop_timeout_sec: 3.0
+
+# --- 边界审计（端上零 token 升级触发器）---
+# 当 L2 经济型模型出现明显失败信号时，通过合成 model_hand_off tool_call
+# 主动升级到 L1 旗舰型模型。
+boundary_audit:
+  # 总开关：false 时所有规则都跳过判定
+  enabled: true
+
+  # R1：重复调用
+  # 滑动窗口内，同一 (tool_name, args_hash) 签名出现于 >= threshold 个批次则触发
+  r1_duplicate_call:
+    window_size: 3
+    threshold: 3
+
+  # R2：FRAMEWORK_FATAL 累积
+  # 滑动窗口内，has_fatal=True 的批次数 >= threshold 则触发
+  r2_fatal_error:
+    window_size: 5
+    threshold: 2
+
+  # R3：失败批次累积
+  # 滑动窗口内，"成功率 < success_rate_threshold" 的批次数 >= threshold 则触发
+  r3_failure_streak:
+    window_size: 5
+    threshold: 3
+
+  # R4：ask_user 过度调用（当前请求累计，非滑动窗口）
+  # 小模型对 ask_user 工具的理解和使用能力较弱，频繁调用会严重打扰用户；
+  # 当前请求生命周期内 ask_user 累计调用次数 >= threshold 时触发升级。
+  # 注意：与 R1/R2/R3 的"近因性遗忘"语义不同——计数永不衰减，
+  # 即使两次调用相隔数十轮仍累计计入。
+  r4_ask_user_abuse:
+    threshold: 3
+
+  # R5：迭代预算耗尽（基于 iteration_count / max_iterations 比例，非滑动窗口）
+  # 当 iteration_count >= ceil(max_iterations × ratio) 时触发升级。
+  # L2 经济模型在长任务上越接近预算上限越容易陷入打转或低质量重复，
+  # 在预算消耗到 ratio 比例时主动让位给 L1 旗舰，避免任务直接撞 max_iterations
+  # 后整体失败收场。
+  # 与 R1/R2/R3（近因性遗忘）/ R4（轮次累计）均不同：iteration_count 本身
+  # 已是单调递增的迭代仪表盘，再叠加窗口逻辑属于重复计数。
+  # ratio 取值范围 [0.0, 1.0]：
+  #   - 0.0：任意非空轮次都立即触发（极端激进，主要用于回归测试）
+  #   - 0.5：默认值，过半预算尚未收敛时升级
+  #   - 1.0：仅当 iteration_count 实际撞到 max_iterations 时触发（与硬上限近似重合）
+  r5_iteration_budget:
+    ratio: 0.5
+
+  # R3 的批次成功率阈值（< 此值的批次记为失败批次）
+  success_rate_threshold: 0.5
+
+# --- 响应级退化重复审计（端上零 token 升级触发器）---
+# 仅在 LLM 响应 finish_reason=MAX_TOKENS 时触发，识别"持续重复同一段
+# 文本直至 token 耗尽"的退化现象。命中后通过合成 model_hand_off
+# tool_call 升级到 L1 旗舰型模型重新生成。
+#
+# 阈值依据：scripts/validate_degenerate_repetition_detection.py 的实测样本。
+# 上线前需补充线上 ≥ 50 条真实退化样本 + ≥ 50 条正常长输出样本二次校准。
+repetition_audit:
+  # 总开关：false 时所有判定都跳过
+  enabled: true
+
+  # 检测末尾窗口字符数（仅取响应末尾这段做指标计算，
+  # 既贴合"截断处的退化形态"又降低长正常输出的开销）
+  tail_chars: 2048
+
+  # 区段长度小于此值时直接放过，避免对短回复误判
+  min_sample_chars: 1024
+
+  # 主指标：最长周期重复段占比阈值（窗口中最长连续重复段长度 / 窗口长度）
+  # 实测正常样本上界 ≤ 0.02、退化样本下界 ≥ 0.97，0.6 留足安全余量
+  longest_repeat_threshold: 0.6
+
+  # 兜底指标：8-gram 重复率阈值
+  ngram_repeat_threshold: 0.95

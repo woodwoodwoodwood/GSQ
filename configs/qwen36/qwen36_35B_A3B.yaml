@@ -52,14 +52,14 @@ quantization:
   scale: [100, 500]
   groupsize: 128
   strength: 6
-  logits_dtype: "bfloat16"   # "float32" for higher precision logits (more memory)
+  logits_dtype: "float32"   # "float32" for higher precision logits (more memory)
 
 training:
   num_epochs: 10
   device_microbatch_size: 4
   lr1: 0.0002          # logit params (masks/signs) learning rate
   lr2: 0.0001          # scales learning rate
-  weight_decay: 1.0
+  weight_decay: 0.1
   checkpoint_dir: "checkpoints/qwen36-35b"
   log_dir: "logs/qwen36-35b"
   act_cache_dir: "cache/act_cache"
