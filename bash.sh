@@ -112,7 +112,7 @@ CUDA_VISIBLE_DEVICES=7 FLASHINFER_DISABLE_VERSION_CHECK=1 /usr/local/app/GSQ/.ve
   --host 127.0.0.1 \
   --port 8900 \
   --max-model-len 4096 \
-  --gpu-memory-utilization 0.85 \
+  --gpu-memory-utilization 0.95 \
   --tokenizer-mode hf \
   --max-num-seqs 128 \
   --generation-config vllm
@@ -471,4 +471,29 @@ export HF_ALLOW_CODE_EVAL=1
   --confirm_run_unsafe_code
 
 # llama 框架性能测试
-CUDA_VISIBLE_DEVICES=5 ./build/bin/llama-bench -m /data1/models/qwen36-35b-a3b-gsq2.gguf -ngl 99 -p 512 -n 128
+CUDA_VISIBLE_DEVICES=6 ./build/bin/llama-bench -m /data1/models/qwen36-35b-a3b-gsq2.gguf -ngl 99 -p 512 -n 128
+# llama 对话
+CUDA_VISIBLE_DEVICES=6 /usr/local/app/llama.cpp/build/bin/llama-cli \
+  -m /data1/models/qwen36-35b-a3b-gsq2.gguf \
+  -c 8192 \
+  -n 4096 \
+  -t 8 \
+  -ngl 99 \
+  -cnv
+# llama-bench 单测性能
+CUDA_VISIBLE_DEVICES=6 ./build/bin/llama-bench \
+  -m /data1/models/qwen36-35b-a3b-gsq2.gguf \
+  -ngl 99 \
+  -p 8192,16384,25000,30000,35000,45000,75000,100000 \
+  -n 4096 \
+  -t 8 \
+  -b 2048 -ub 512 \
+  -ctk q8_0 -ctv q8_0 \
+  -fa
+
+CUDA_VISIBLE_DEVICES=6 ./build/bin/llama-server \
+  -m /data1/models/qwen36-35b-a3b-gsq2.gguf \
+  -c 110000 -ngl 99 -t 8 \
+  --port 8901 --host 0.0.0.0 \
+  -ctk q8_0 -ctv q8_0 -fa on
+

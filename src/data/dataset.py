@@ -339,5 +339,140 @@ def mixed(tokenizer, batch_size, train_samples, val_samples, gpt_samples, num_wo
 
     return train_loader, val_loader, gpt_loader
 
+def _render_marvis_example(example, tokenizer):
+    """Render one Marvis agent-trace example into a single calibration `text`.
+
+    - roles: human->user, gpt/function_call->assistant, observation->tool.
+    - Prefer the model's own chat_template; pass `tools` when present so the
+      calibration distribution matches real agent inputs (long tool-defining
+      system prompts). Falls back to a plain render if no chat_template.
+    """
+    role_map = {
+        "human": "user",
+        "gpt": "assistant",
+        "assistant": "assistant",
+        "system": "system",
+        "function_call": "assistant",
+        "observation": "tool",
+        "tool": "tool",
+    }
+
+    messages = []
+    if example.get("system"):
+        messages.append({"role": "system", "content": str(example["system"])})
+    for msg in example.get("conversations", []):
+        role = role_map.get(msg.get("from", ""), "user")
+        messages.append({"role": role, "content": str(msg.get("value", ""))})
+
+    tools = None
+    raw_tools = example.get("tools")
+    if raw_tools:
+        try:
+            import json as _json
+            tools = _json.loads(raw_tools) if isinstance(raw_tools, str) else raw_tools
+        except Exception:
+            tools = None
+
+    chat_template = getattr(tokenizer, "chat_template", None)
+    if chat_template:
+        try:
+            return tokenizer.apply_chat_template(
+                messages, tools=tools, tokenize=False, add_generation_prompt=False
+            )
+        except Exception:
+            # Some templates don't accept `tools`; retry without it.
+            return tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=False
+            )
+    return _render_messages_without_chat_template(messages)
+
+
+def marvis_mixed(tokenizer, batch_size, train_samples, val_samples, gpt_samples,
+                 num_workers, max_length, shuffle_seed=1234, seed=42,
+                 marvis_jsonl_path="/home/cakejiang/github/qwen3.6_trace_v2_merged_train_masked.jsonl",
+                 open_thoughts_max_samples=10_000, **_kw):
+    """Business-first mixed calibration: fill as many chunks as possible from the
+    Marvis agent-trace jsonl, then top up to `train+val+gpt` with OpenThoughts so
+    the calibration set aligns with the agent business distribution without
+    starving on the (small) business set.
+    """
+    rank, world_size = _get_dist_info()
+    total_needed = train_samples + val_samples + gpt_samples
+
+    if rank == 0 or world_size <= 1:
+        # 1) Business data first (primary distribution).
+        biz_ds = load_dataset("json", data_files=marvis_jsonl_path, split="train")
+        biz_ds = biz_ds.shuffle(seed=seed)
+        biz_cols = biz_ds.column_names
+        biz_ds = biz_ds.map(
+            lambda ex: {"text": _render_marvis_example(ex, tokenizer)},
+            remove_columns=biz_cols,
+            num_proc=min(8, os.cpu_count() or 1),
+        )
+        biz_chunks = make_concat_chunks(biz_ds, tokenizer, max_length, total_needed, seed=shuffle_seed)
+        print(f"[marvis_mixed] business chunks: {len(biz_chunks)} / needed {total_needed}", flush=True)
+
+        # 2) Top up the remainder with OpenThoughts (general data, prevents
+        #    over-fitting the small business set).
+        remaining = total_needed - len(biz_chunks)
+        ot_chunks = []
+        if remaining > 0:
+            tmpl = tokenizer.chat_template
+            if tmpl is not None:
+                tmpl = tmpl.replace(
+                    "<think></think>{{render_content(message)}}",
+                    "{%- set rc = message.get('reasoning_content', '') -%}"
+                    "<think>{{rc}}</think>{{render_content(message)}}"
+                )
+                tokenizer.chat_template = tmpl
+
+            ot = load_dataset("open-thoughts/OpenThoughts-114k", split="train")
+            ot = ot.shuffle(seed=seed).select(range(open_thoughts_max_samples))
+
+            def _ot_preprocess(example):
+                messages = [{
+                    "role": "system",
+                    "content": "You are Kimi, an AI assistant created by Moonshot AI.",
+                }]
+                for msg in example["conversations"]:
+                    if msg["from"] == "user":
+                        messages.append({"role": "user", "content": msg["value"]})
+                    else:
+                        thought, solution = split_thought_solution(msg["value"])
+                        messages.append({"role": "assistant", "content": solution,
+                                         "reasoning_content": thought})
+                return {"text": _safe_apply_chat_template(tokenizer, messages)}
+
+            ot = ot.map(_ot_preprocess, remove_columns=ot.column_names,
+                        num_proc=min(8, os.cpu_count() or 1))
+            ot_chunks = make_concat_chunks(ot, tokenizer, max_length, remaining, seed=shuffle_seed)
+            print(f"[marvis_mixed] open_thoughts top-up chunks: {len(ot_chunks)}", flush=True)
+
+        all_chunks = biz_chunks + ot_chunks
+        if len(all_chunks) < total_needed:
+            print(f"[marvis_mixed] WARNING: only {len(all_chunks)} chunks < needed {total_needed}; "
+                  f"consider raising open_thoughts_max_samples or lowering num_samples.", flush=True)
+        # Interleave so business/general are mixed across train/val/gpt splits.
+        random.seed(shuffle_seed)
+        random.shuffle(all_chunks)
+    else:
+        all_chunks = [torch.zeros(max_length, dtype=torch.long)]
+
+    if world_size > 1:
+        all_chunks = _broadcast_chunks(all_chunks, rank, world_size)
+    if rank == 0:
+        print("[marvis_mixed] dataset ready.", flush=True)
+
+    train_tokens = all_chunks[:train_samples]
+    val_tokens = all_chunks[train_samples:train_samples + val_samples]
+    gpt_tokens = all_chunks[train_samples + val_samples:total_needed]
+
+    train_loader = DataLoader(_maybe_shard(train_tokens), batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    val_loader = DataLoader(_maybe_shard(val_tokens), batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    gpt_loader = DataLoader(_maybe_shard(gpt_tokens), batch_size=batch_size, shuffle=False, num_workers=num_workers)
+
+    return train_loader, val_loader, gpt_loader
+
+
 def create_dataloader(dataset_name, tokenizer, batch_size, train_samples, val_samples, gpt_samples, num_workers, max_length, **kwargs):
     return globals()[dataset_name](tokenizer, batch_size, train_samples, val_samples, gpt_samples, num_workers, max_length, **kwargs)
