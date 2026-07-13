@@ -64,7 +64,7 @@ training:
   log_dir: "logs/qwen36-35b"
   act_cache_dir: "cache/act_cache"
   eval_baseline: true
-  # ppl_eval_every_n_layers: 6
+  ppl_eval_every_n_layers: 1
 
 gptq:
   nsamples: 512
