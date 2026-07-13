@@ -389,7 +389,7 @@ def _render_marvis_example(example, tokenizer):
 
 def marvis_mixed(tokenizer, batch_size, train_samples, val_samples, gpt_samples,
                  num_workers, max_length, shuffle_seed=1234, seed=42,
-                 marvis_jsonl_path="/home/cakejiang/github/qwen3.6_trace_v2_merged_train_masked.jsonl",
+                 marvis_jsonl_path="/usr/local/app/GSQ/qwen3.6_trace_v2_merged_train_masked.jsonl",
                  open_thoughts_max_samples=10_000, **_kw):
     """Business-first mixed calibration: fill as many chunks as possible from the
     Marvis agent-trace jsonl, then top up to `train+val+gpt` with OpenThoughts so
