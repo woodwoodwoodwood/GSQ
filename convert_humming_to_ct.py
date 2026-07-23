@@ -1,4 +1,4 @@
-"""Convert a Humming-format GSQ checkpoint back into an assembled
+r"""Convert a Humming-format GSQ checkpoint back into an assembled
 compressed-tensors (pack-quantized) checkpoint.
 
 This is the exact inverse of `convert_to_humming.py` / `humming_pack.ct_to_humming`.
